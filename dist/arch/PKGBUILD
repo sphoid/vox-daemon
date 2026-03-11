@@ -1,0 +1,53 @@
+# Maintainer: Your Name <your.email@example.com>
+pkgname=vox-daemon
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Linux-native meeting transcription and summarization service"
+arch=('x86_64')
+url="https://github.com/user/vox-daemon"
+license=('MIT')
+depends=(
+  'pipewire'
+  'dbus'
+)
+makedepends=(
+  'rust'
+  'cargo'
+  'pkg-config'
+  'pipewire'    # for libpipewire headers
+  'dbus'        # for libdbus headers
+)
+optdepends=(
+  'gtk3: System tray support'
+  'libayatana-appindicator: System tray on GNOME'
+  'ollama: Local LLM summarization'
+)
+source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+  cd "$pkgname-$pkgver"
+  cargo build --release --locked
+}
+
+check() {
+  cd "$pkgname-$pkgver"
+  cargo test --release --locked
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+
+  # Binary
+  install -Dm755 "target/release/vox-daemon" "$pkgdir/usr/bin/vox-daemon"
+
+  # systemd user service
+  install -Dm644 "dist/systemd/vox-daemon.service" \
+    "$pkgdir/usr/lib/systemd/user/vox-daemon.service"
+
+  # Man page
+  install -Dm644 "dist/man/vox-daemon.1" "$pkgdir/usr/share/man/man1/vox-daemon.1"
+
+  # License
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

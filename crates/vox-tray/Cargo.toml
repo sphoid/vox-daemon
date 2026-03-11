@@ -1,0 +1,29 @@
+[package]
+name = "vox-tray"
+description = "System tray icon and popup menu (Phase 2)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+vox-core = { workspace = true }
+crossbeam-channel = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+
+[dependencies.tray-icon]
+version = "0.21"
+optional = true
+
+[dependencies.muda]
+version = "0.17"
+optional = true
+
+[dependencies.gtk]
+version = "0.18"
+optional = true
+
+[features]
+default = []
+gtk = ["dep:tray-icon", "dep:muda", "dep:gtk"]

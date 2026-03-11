@@ -1,0 +1,17 @@
+#!/usr/bin/make -f
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	cargo build --release --locked
+
+override_dh_auto_install:
+	install -Dm755 target/release/vox-daemon debian/vox-daemon/usr/bin/vox-daemon
+	install -Dm644 dist/systemd/vox-daemon.service \
+		debian/vox-daemon/usr/lib/systemd/user/vox-daemon.service
+	install -Dm644 dist/man/vox-daemon.1 \
+		debian/vox-daemon/usr/share/man/man1/vox-daemon.1
+
+override_dh_auto_test:
+	cargo test --release --locked

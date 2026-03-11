@@ -1,0 +1,143 @@
+.TH VOX-DAEMON 1 "March 2026" "vox-daemon 0.1.0" "User Commands"
+.SH NAME
+vox-daemon \- Linux-native meeting transcription and summarization service
+.SH SYNOPSIS
+.B vox-daemon
+[\fB\-v\fR|\fB\-vv\fR]
+.I command
+[\fIoptions\fR]
+.SH DESCRIPTION
+.B vox-daemon
+is a background service that captures video call audio via PipeWire,
+transcribes it with Whisper (GPU-accelerated), performs speaker diarization,
+and generates AI-powered post-call summaries.
+.PP
+It operates as a system daemon that hooks into PipeWire to capture both
+microphone input and application audio output, providing full-conversation
+transcription with speaker identification.
+.SH COMMANDS
+.TP
+.B start
+Start the daemon and begin listening for recording commands via the system tray.
+.TP
+.B record \fR[\fB\-\-mic\fR \fISOURCE\fR] [\fB\-\-app\fR \fISOURCE\fR]
+Record a session interactively. Captures audio until stopped with Ctrl+C.
+Use \fB\-\-mic\fR and \fB\-\-app\fR to override the default PipeWire sources.
+.TP
+.B list\-sources
+List available PipeWire audio sources (microphones and application streams).
+.TP
+.B list\-sessions
+List past recording sessions with their IDs, dates, and durations.
+.TP
+.B summarize \fISESSION_ID\fR
+Generate an AI summary for a past session using the configured LLM backend.
+.TP
+.B export \fISESSION_ID\fR
+Export a session to Markdown format and print to stdout.
+.TP
+.B show\-config
+Display the current configuration in TOML format.
+.TP
+.B init\-config
+Create the default configuration file if it does not exist.
+.SH OPTIONS
+.TP
+.BR \-v ", " \-\-verbose
+Increase log verbosity. Use \fB\-v\fR for debug, \fB\-vv\fR for trace.
+.TP
+.BR \-h ", " \-\-help
+Print help information.
+.TP
+.BR \-V ", " \-\-version
+Print version information.
+.SH FILES
+.TP
+.I $XDG_CONFIG_HOME/vox-daemon/config.toml
+Main configuration file. Created by \fBinit\-config\fR.
+.TP
+.I $XDG_DATA_HOME/vox-daemon/sessions/
+Directory containing JSON session files.
+.TP
+.I $XDG_CACHE_HOME/vox-daemon/models/
+Directory for downloaded Whisper GGML model files.
+.SH CONFIGURATION
+The configuration file uses TOML format with the following sections:
+.PP
+.B [audio]
+\- Microphone and application audio source settings.
+.PP
+.B [transcription]
+\- Whisper model, language, GPU backend, and model path.
+.PP
+.B [summarization]
+\- LLM backend (ollama, openai_compatible), API URLs, and model settings.
+.PP
+.B [storage]
+\- Data directory, audio retention, and export format preferences.
+.PP
+.B [notifications]
+\- Desktop notification toggles for recording, transcription, and summary events.
+.SH EXAMPLES
+.PP
+Record a session:
+.RS
+.nf
+vox-daemon record
+.fi
+.RE
+.PP
+Record with a specific microphone:
+.RS
+.nf
+vox-daemon record \-\-mic "alsa_input.usb\-Rode_NT\-USB"
+.fi
+.RE
+.PP
+Summarize a past session:
+.RS
+.nf
+vox-daemon summarize 550e8400-e29b-41d4-a716-446655440000
+.fi
+.RE
+.PP
+Export a session to a file:
+.RS
+.nf
+vox-daemon export 550e8400-e29b-41d4-a716-446655440000 > meeting.md
+.fi
+.RE
+.PP
+Run as a systemd user service:
+.RS
+.nf
+systemctl \-\-user enable \-\-now vox-daemon
+.fi
+.RE
+.SH ENVIRONMENT
+.TP
+.B XDG_CONFIG_HOME
+Config directory. Defaults to \fI~/.config\fR.
+.TP
+.B XDG_DATA_HOME
+Data directory. Defaults to \fI~/.local/share\fR.
+.TP
+.B XDG_CACHE_HOME
+Cache directory. Defaults to \fI~/.cache\fR.
+.TP
+.B RUST_LOG
+Override log filter (e.g., \fBRUST_LOG=vox_daemon=trace\fR).
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B 1
+General error (see stderr for details).
+.SH BUGS
+Report bugs at https://github.com/user/vox-daemon/issues
+.SH SEE ALSO
+.BR pipewire (1),
+.BR systemctl (1)
+.SH LICENSE
+MIT License

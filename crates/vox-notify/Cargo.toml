@@ -1,0 +1,14 @@
+[package]
+name = "vox-notify"
+description = "Desktop notification wrapper (Phase 2)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+vox-core = { workspace = true }
+notify-rust = "4.11.6"
+tracing = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }

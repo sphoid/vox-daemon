@@ -1,0 +1,39 @@
+[package]
+name = "vox-daemon"
+description = "Linux-native meeting transcription & summarization daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "vox-daemon"
+path = "src/main.rs"
+
+[dependencies]
+vox-core = { workspace = true }
+vox-capture = { workspace = true }
+vox-transcribe = { workspace = true }
+vox-storage = { workspace = true }
+vox-tray = { path = "../crates/vox-tray" }
+vox-notify = { path = "../crates/vox-notify" }
+vox-summarize = { path = "../crates/vox-summarize" }
+vox-gui = { path = "../crates/vox-gui", optional = true, features = ["ui"] }
+
+tokio = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+toml = { workspace = true }
+chrono = { workspace = true }
+crossbeam-channel = { workspace = true }
+uuid = { workspace = true }
+
+[features]
+gtk = ["vox-tray/gtk"]
+ui = ["dep:vox-gui"]
+pw = ["vox-capture/pw"]
+whisper = ["vox-transcribe/whisper"]
+cuda = ["vox-transcribe/cuda"]
+hipblas = ["vox-transcribe/hipblas"]

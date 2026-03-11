@@ -1,0 +1,30 @@
+[Unit]
+Description=Vox Daemon — Meeting Transcription & Summarization Service
+Documentation=https://github.com/user/vox-daemon
+After=pipewire.service
+Requires=pipewire.service
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.cargo/bin/vox-daemon start
+Restart=on-failure
+RestartSec=5
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=vox-daemon
+
+# Hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.local/share/vox-daemon %h/.config/vox-daemon %h/.cache/vox-daemon
+PrivateTmp=yes
+
+# PipeWire access
+Environment=PIPEWIRE_RUNTIME_DIR=%t/pipewire-0
+
+[Install]
+WantedBy=graphical-session.target

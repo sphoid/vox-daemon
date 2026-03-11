@@ -1,0 +1,28 @@
+[package]
+name = "vox-gui"
+description = "iced-based settings window and transcript browser for Vox Daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+vox-core = { workspace = true }
+vox-storage = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+
+[dependencies.iced]
+version = "0.14"
+optional = true
+features = ["tokio"]
+
+[features]
+default = []
+ui = ["dep:iced"]
+
+[dev-dependencies]
+tempfile = "3"

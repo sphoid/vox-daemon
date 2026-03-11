@@ -1,0 +1,33 @@
+Source: vox-daemon
+Section: sound
+Priority: optional
+Maintainer: Your Name <your.email@example.com>
+Build-Depends: debhelper-compat (= 13),
+               cargo,
+               rustc (>= 1.85),
+               pkg-config,
+               libdbus-1-dev,
+               libpipewire-0.3-dev
+Standards-Version: 4.6.2
+Homepage: https://github.com/user/vox-daemon
+Rules-Requires-Root: no
+
+Package: vox-daemon
+Architecture: amd64
+Depends: ${shlibs:Depends},
+         ${misc:Depends},
+         pipewire
+Recommends: ollama
+Suggests: gtk3
+Description: Linux-native meeting transcription and summarization service
+ Vox Daemon is a background service that captures video call audio via
+ PipeWire, transcribes it with Whisper (GPU-accelerated), performs speaker
+ diarization, and generates AI-powered post-call summaries.
+ .
+ Features:
+  - PipeWire-native audio capture
+  - Local Whisper transcription (GPU-accelerated)
+  - Speaker separation (mic vs. remote audio)
+  - AI-powered meeting summaries (Ollama, OpenAI-compatible)
+  - System tray control with desktop notifications
+  - Markdown and JSON export

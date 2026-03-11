@@ -1,0 +1,29 @@
+[package]
+name = "vox-capture"
+description = "PipeWire audio capture for Vox Daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+# Enable the real PipeWire backend. Requires libpipewire-0.3-dev to be installed.
+# Without this feature the crate still compiles and exposes the full public API,
+# but PipeWireSource::new() returns CaptureError::Connection at runtime.
+pw = ["dep:pipewire"]
+
+# Run integration tests against a live PipeWire daemon.
+integration = ["pw"]
+
+[dependencies]
+vox-core = { workspace = true }
+crossbeam-channel = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+
+# Optional: only linked when the `pw` feature is enabled.
+pipewire = { version = "0.9.2", optional = true }
+
+[dev-dependencies]
+tracing-subscriber = { workspace = true }

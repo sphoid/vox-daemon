@@ -1,0 +1,36 @@
+app-id: com.github.user.VoxDaemon
+runtime: org.freedesktop.Platform
+runtime-version: '24.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+
+command: vox-daemon
+
+finish-args:
+  # PipeWire access for audio capture
+  - --filesystem=xdg-run/pipewire-0
+  # D-Bus for desktop notifications
+  - --talk-name=org.freedesktop.Notifications
+  # XDG directories for config/data/cache
+  - --filesystem=xdg-config/vox-daemon
+  - --filesystem=xdg-data/vox-daemon
+  - --filesystem=xdg-cache/vox-daemon
+  # Network access for LLM API calls (Ollama, OpenAI)
+  - --share=network
+
+modules:
+  - name: vox-daemon
+    buildsystem: simple
+    build-options:
+      append-path: /usr/lib/sdk/rust-stable/bin
+      env:
+        CARGO_HOME: /run/build/vox-daemon/cargo
+    build-commands:
+      - cargo --offline fetch --manifest-path Cargo.toml --verbose
+      - cargo --offline build --release --verbose
+      - install -Dm755 target/release/vox-daemon /app/bin/vox-daemon
+      - install -Dm644 dist/man/vox-daemon.1 /app/share/man/man1/vox-daemon.1
+    sources:
+      - type: dir
+        path: ../..

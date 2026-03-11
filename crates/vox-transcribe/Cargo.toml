@@ -1,0 +1,30 @@
+[package]
+name = "vox-transcribe"
+description = "Whisper-based speech-to-text transcription with GPU support for Vox Daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+vox-core = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+
+[dependencies.whisper-rs]
+version = "0.15.1"
+optional = true
+
+[features]
+default = []
+# Enable whisper-rs integration (requires whisper.cpp native libraries)
+whisper = ["dep:whisper-rs"]
+# CUDA GPU acceleration — requires NVIDIA drivers and CUDA toolkit
+# Mutually exclusive with hipblas at compile time
+cuda = ["whisper", "whisper-rs/cuda"]
+# AMD ROCm/hipBLAS GPU acceleration — requires ROCm stack
+# Mutually exclusive with cuda at compile time
+hipblas = ["whisper", "whisper-rs/hipblas"]
+
+[dev-dependencies]
+tempfile = "3"
