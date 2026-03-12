@@ -59,6 +59,10 @@ pub enum TranscribeError {
     /// The provided audio data is invalid.
     #[error("invalid audio data: {0}")]
     InvalidAudio(String),
+
+    /// Failed to download a Whisper model file.
+    #[error("model download failed: {0}")]
+    ModelDownload(String),
 }
 
 /// Errors related to session storage.

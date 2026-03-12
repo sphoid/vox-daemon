@@ -22,7 +22,7 @@ use iced::widget::rule;
 use iced::widget::{
     Column, button, column, container, pick_list, row, scrollable, text, text_input, toggler,
 };
-use iced::{Element, Fill, Font, Size, Task, Theme};
+use iced::{Element, Fill, Font, Length, Size, Task, Theme};
 use tracing::{error, info, warn};
 use uuid::Uuid;
 use vox_core::config::AppConfig;
@@ -35,6 +35,48 @@ use crate::settings::{
     ExportFormat, GpuBackend, SettingsModel, SummarizationBackend, WhisperModel,
 };
 use crate::theme as vox_theme;
+
+// ──────────────────────────────────────────────────────────────────────────────
+// AudioSourceOption
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// A selectable audio source entry for the mic/app source fields.
+///
+/// Wraps a PipeWire node ID (or the sentinel `"auto"`) with a human-readable
+/// display name suitable for showing in the UI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AudioSourceOption {
+    /// PipeWire node ID as a string, or `"auto"` for the system default.
+    pub node_id: String,
+    /// Human-readable label shown in the dropdown.
+    pub display_name: String,
+}
+
+impl std::fmt::Display for AudioSourceOption {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.display_name)
+    }
+}
+
+impl AudioSourceOption {
+    /// The sentinel option that tells the daemon to pick the best source
+    /// automatically.
+    #[must_use]
+    pub fn auto() -> Self {
+        Self {
+            node_id: "auto".to_owned(),
+            display_name: "Auto (system default)".to_owned(),
+        }
+    }
+
+    /// Build a list containing only the `auto` option.
+    ///
+    /// Used as a fallback when PipeWire enumeration is unavailable.
+    #[must_use]
+    pub fn fallback_list() -> Vec<Self> {
+        vec![Self::auto()]
+    }
+}
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Page enum
@@ -61,10 +103,10 @@ pub enum Message {
     NavigateTo(Page),
 
     // ── Settings: Audio ─────────────────────────────────────────────────────
-    /// The mic source text field changed.
-    MicSourceChanged(String),
-    /// The app source text field changed.
-    AppSourceChanged(String),
+    /// The mic source dropdown selection changed.
+    MicSourceChanged(AudioSourceOption),
+    /// The app source dropdown selection changed.
+    AppSourceChanged(AudioSourceOption),
 
     // ── Settings: Transcription ──────────────────────────────────────────────
     /// The model pick-list changed.
@@ -127,7 +169,7 @@ pub enum Message {
     SessionLoaded(Box<Session>),
     /// The user requested export of the selected session to Markdown.
     ExportSelectedSession,
-    /// Export result (the Markdown string, or an error message).
+    /// Export result (the absolute path of the written `.md` file, or an error message).
     ExportResult(Result<String, String>),
     /// The user requested deletion of the selected session.
     DeleteSelectedSession,
@@ -142,6 +184,8 @@ pub enum Message {
     },
     /// Sessions list was refreshed from disk.
     SessionsLoaded(Vec<Session>),
+    /// Speaker names were persisted to disk (carries success flag).
+    SpeakerNamesSaved(bool),
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -158,6 +202,16 @@ pub struct VoxAppState {
 
     /// Whether the last settings save succeeded (for status feedback).
     pub settings_save_status: Option<bool>,
+
+    /// Available microphone sources for the audio section pick-list.
+    ///
+    /// Always contains at least the `"auto"` sentinel option.
+    pub available_mic_sources: Vec<AudioSourceOption>,
+
+    /// Available application audio sources for the audio section pick-list.
+    ///
+    /// Always contains at least the `"auto"` sentinel option.
+    pub available_app_sources: Vec<AudioSourceOption>,
 
     // ── Browser state ────────────────────────────────────────────────────────
     /// All sessions available in the store (lightweight list entries).
@@ -197,10 +251,32 @@ impl VoxAppState {
         let all_sessions = load_sessions_from_store(&config.storage.data_dir);
         let session_list = build_session_list(&all_sessions);
 
+        // Enumerate real PipeWire sources (when the `pw` feature is enabled)
+        // and split them into mic-type and app-type lists.
+        let all_streams = enumerate_pipewire_sources();
+        let mut available_mic_sources = vec![AudioSourceOption::auto()];
+        let mut available_app_sources = vec![AudioSourceOption::auto()];
+        for stream in &all_streams {
+            let opt = AudioSourceOption {
+                node_id: stream.node_id.to_string(),
+                display_name: stream
+                    .description
+                    .clone()
+                    .unwrap_or_else(|| stream.name.clone()),
+            };
+            if stream.is_source() {
+                available_mic_sources.push(opt);
+            } else {
+                available_app_sources.push(opt);
+            }
+        }
+
         Self {
             page: Page::Browser,
             settings,
             settings_save_status: None,
+            available_mic_sources,
+            available_app_sources,
             session_list,
             all_sessions,
             search_query: String::new(),
@@ -256,12 +332,12 @@ pub fn update(state: &mut VoxAppState, message: Message) -> Task<Message> {
         }
 
         // ── Audio settings ────────────────────────────────────────────────
-        Message::MicSourceChanged(s) => {
-            state.settings.audio.mic_source = s;
+        Message::MicSourceChanged(opt) => {
+            state.settings.audio.mic_source = opt.node_id;
             Task::none()
         }
-        Message::AppSourceChanged(s) => {
-            state.settings.audio.app_source = s;
+        Message::AppSourceChanged(opt) => {
+            state.settings.audio.app_source = opt.node_id;
             Task::none()
         }
 
@@ -403,16 +479,29 @@ pub fn update(state: &mut VoxAppState, message: Message) -> Task<Message> {
             Task::perform(
                 async move {
                     let store = JsonFileStore::new(&data_dir).map_err(|e| e.to_string())?;
-                    store.export_markdown(id).map_err(|e| e.to_string())
+                    let md = store.export_markdown(id).map_err(|e| e.to_string())?;
+
+                    // Write the markdown alongside the session JSON in the data
+                    // directory (one level above the sessions/ subdir).
+                    let out_path = vox_core::paths::data_dir_or(&data_dir)
+                        .join(format!("{id}.md"));
+                    std::fs::write(&out_path, md.as_bytes())
+                        .map_err(|e| e.to_string())?;
+
+                    let path_str = out_path
+                        .to_str()
+                        .unwrap_or("<non-utf8 path>")
+                        .to_owned();
+                    Ok(path_str)
                 },
                 Message::ExportResult,
             )
         }
         Message::ExportResult(result) => {
             match result {
-                Ok(md) => {
-                    info!("export produced {} bytes of Markdown", md.len());
-                    state.browser_status = Some(format!("Exported ({} bytes)", md.len()));
+                Ok(path) => {
+                    info!("session exported to {path}");
+                    state.browser_status = Some(format!("Exported to {path}"));
                 }
                 Err(e) => {
                     error!("export failed: {e}");
@@ -463,6 +552,29 @@ pub fn update(state: &mut VoxAppState, message: Message) -> Task<Message> {
                 } else {
                     warn!("speaker_index {speaker_index} out of range");
                 }
+
+                // Persist the updated session to disk immediately.
+                let session_clone = session.clone();
+                let data_dir = state.settings.storage.data_dir.clone();
+                return Task::perform(
+                    async move {
+                        JsonFileStore::new(&data_dir)
+                            .and_then(|store| store.save(&session_clone))
+                            .is_ok()
+                    },
+                    Message::SpeakerNamesSaved,
+                );
+            }
+            Task::none()
+        }
+
+        // ── Speaker names persistence result ──────────────────────────────
+        Message::SpeakerNamesSaved(ok) => {
+            if ok {
+                info!("speaker names persisted to disk");
+            } else {
+                error!("failed to persist speaker names to disk");
+                state.browser_status = Some("Failed to save speaker names.".to_owned());
             }
             Task::none()
         }
@@ -523,18 +635,39 @@ fn view_settings(state: &VoxAppState) -> Element<'_, Message> {
     let s = &state.settings;
 
     // ── Audio section ─────────────────────────────────────────────────────
+    let selected_mic = state
+        .available_mic_sources
+        .iter()
+        .find(|o| o.node_id == s.audio.mic_source)
+        .cloned();
+    let selected_app = state
+        .available_app_sources
+        .iter()
+        .find(|o| o.node_id == s.audio.app_source)
+        .cloned();
+
     let audio_section = section_column(
         "Audio Sources",
         column![
-            labeled_text_input(
-                "Microphone source (PipeWire node ID or \"auto\")",
-                &s.audio.mic_source,
-                Message::MicSourceChanged,
+            pick_row(
+                "Microphone",
+                pick_list(
+                    state.available_mic_sources.clone(),
+                    selected_mic,
+                    Message::MicSourceChanged,
+                )
+                .placeholder("Choose a source…")
+                .width(Fill),
             ),
-            labeled_text_input(
-                "Application audio source (PipeWire node ID or \"auto\")",
-                &s.audio.app_source,
-                Message::AppSourceChanged,
+            pick_row(
+                "Application audio",
+                pick_list(
+                    state.available_app_sources.clone(),
+                    selected_app,
+                    Message::AppSourceChanged,
+                )
+                .placeholder("Choose a source…")
+                .width(Fill),
             ),
         ],
     );
@@ -543,31 +676,33 @@ fn view_settings(state: &VoxAppState) -> Element<'_, Message> {
     let transcription_section = section_column(
         "Transcription",
         column![
-            row![
-                text("Whisper model:").width(200u32),
+            pick_row(
+                "Whisper model",
                 pick_list(
                     WhisperModel::all(),
                     Some(s.transcription.model),
                     Message::ModelChanged,
                 )
-            ]
-            .spacing(vox_theme::SPACING),
-            labeled_text_input(
-                "Language code (e.g. \"en\" or \"auto\")",
+                .width(Fill),
+            ),
+            stacked_text_input(
+                "Language code",
+                "e.g. \"en\" or \"auto\" for detection",
                 &s.transcription.language,
                 Message::LanguageChanged,
             ),
-            row![
-                text("GPU backend:").width(200u32),
+            pick_row(
+                "GPU backend",
                 pick_list(
                     GpuBackend::all(),
                     Some(s.transcription.gpu_backend),
                     Message::GpuBackendChanged,
                 )
-            ]
-            .spacing(vox_theme::SPACING),
-            labeled_text_input(
-                "Custom model path (leave empty for default cache)",
+                .width(Fill),
+            ),
+            stacked_text_input(
+                "Custom model path",
+                "Leave empty to use the XDG cache default",
                 &s.transcription.model_path,
                 Message::ModelPathChanged,
             ),
@@ -578,40 +713,49 @@ fn view_settings(state: &VoxAppState) -> Element<'_, Message> {
     let summarization_section = section_column(
         "Summarization",
         column![
-            row![
-                text("Backend:").width(200u32),
+            pick_row(
+                "Backend",
                 pick_list(
                     SummarizationBackend::all(),
                     Some(s.summarization.backend),
                     Message::BackendChanged,
                 )
-            ]
-            .spacing(vox_theme::SPACING),
-            row![
-                text("Auto-summarize:").width(200u32),
-                toggler(s.summarization.auto_summarize).on_toggle(Message::AutoSummarizeToggled),
-            ]
-            .spacing(vox_theme::SPACING),
-            labeled_text_input(
+                .width(Fill),
+            ),
+            toggle_row(
+                "Auto-summarize when transcription finishes",
+                s.summarization.auto_summarize,
+                Message::AutoSummarizeToggled,
+            ),
+            stacked_text_input(
                 "Ollama server URL",
+                "e.g. http://localhost:11434",
                 &s.summarization.ollama_url,
                 Message::OllamaUrlChanged,
             ),
-            labeled_text_input(
+            stacked_text_input(
                 "Ollama model name",
+                "e.g. llama3",
                 &s.summarization.ollama_model,
                 Message::OllamaModelChanged,
             ),
-            labeled_text_input(
+            stacked_text_input(
                 "API URL (OpenAI-compatible)",
+                "e.g. https://api.openai.com/v1",
                 &s.summarization.api_url,
                 Message::ApiUrlChanged,
             ),
-            text_input("API key (stored in plaintext)", &s.summarization.api_key)
-                .on_input(Message::ApiKeyChanged)
-                .secure(true),
-            labeled_text_input(
+            column![
+                text("API key").size(13u32),
+                text_input("Stored in plaintext — chmod 600 your config file", &s.summarization.api_key)
+                    .on_input(Message::ApiKeyChanged)
+                    .secure(true)
+                    .width(Fill),
+            ]
+            .spacing(vox_theme::SPACING / 2.0),
+            stacked_text_input(
                 "API model name",
+                "e.g. gpt-4o",
                 &s.summarization.api_model,
                 Message::ApiModelChanged,
             ),
@@ -622,25 +766,26 @@ fn view_settings(state: &VoxAppState) -> Element<'_, Message> {
     let storage_section = section_column(
         "Storage",
         column![
-            labeled_text_input(
-                "Data directory (leave empty for XDG default)",
+            stacked_text_input(
+                "Data directory",
+                "Leave empty to use the XDG default ($XDG_DATA_HOME/vox-daemon/)",
                 &s.storage.data_dir,
                 Message::DataDirChanged,
             ),
-            row![
-                text("Export format:").width(200u32),
+            pick_row(
+                "Export format",
                 pick_list(
                     ExportFormat::all(),
                     Some(s.storage.export_format),
                     Message::ExportFormatChanged,
                 )
-            ]
-            .spacing(vox_theme::SPACING),
-            row![
-                text("Retain raw audio:").width(200u32),
-                toggler(s.storage.retain_audio).on_toggle(Message::RetainAudioToggled),
-            ]
-            .spacing(vox_theme::SPACING),
+                .width(Fill),
+            ),
+            toggle_row(
+                "Retain raw audio files after transcription",
+                s.storage.retain_audio,
+                Message::RetainAudioToggled,
+            ),
         ],
     );
 
@@ -648,32 +793,31 @@ fn view_settings(state: &VoxAppState) -> Element<'_, Message> {
     let notifications_section = section_column(
         "Notifications",
         column![
-            row![
-                text("Enable notifications:").width(240u32),
-                toggler(s.notifications.enabled).on_toggle(Message::NotificationsEnabledToggled),
-            ]
-            .spacing(vox_theme::SPACING),
-            row![
-                text("On recording start:").width(240u32),
-                toggler(s.notifications.on_record_start).on_toggle(Message::OnRecordStartToggled),
-            ]
-            .spacing(vox_theme::SPACING),
-            row![
-                text("On recording stop:").width(240u32),
-                toggler(s.notifications.on_record_stop).on_toggle(Message::OnRecordStopToggled),
-            ]
-            .spacing(vox_theme::SPACING),
-            row![
-                text("On transcript ready:").width(240u32),
-                toggler(s.notifications.on_transcript_ready)
-                    .on_toggle(Message::OnTranscriptReadyToggled),
-            ]
-            .spacing(vox_theme::SPACING),
-            row![
-                text("On summary ready:").width(240u32),
-                toggler(s.notifications.on_summary_ready).on_toggle(Message::OnSummaryReadyToggled),
-            ]
-            .spacing(vox_theme::SPACING),
+            toggle_row(
+                "Enable notifications",
+                s.notifications.enabled,
+                Message::NotificationsEnabledToggled,
+            ),
+            toggle_row(
+                "On recording start",
+                s.notifications.on_record_start,
+                Message::OnRecordStartToggled,
+            ),
+            toggle_row(
+                "On recording stop",
+                s.notifications.on_record_stop,
+                Message::OnRecordStopToggled,
+            ),
+            toggle_row(
+                "On transcript ready",
+                s.notifications.on_transcript_ready,
+                Message::OnTranscriptReadyToggled,
+            ),
+            toggle_row(
+                "On summary ready",
+                s.notifications.on_summary_ready,
+                Message::OnSummaryReadyToggled,
+            ),
         ],
     );
 
@@ -695,23 +839,30 @@ fn view_settings(state: &VoxAppState) -> Element<'_, Message> {
     };
 
     let save_row = row![
-        button("Save Settings").on_press(Message::SaveSettings),
+        button("Save Settings")
+            .on_press(Message::SaveSettings)
+            .style(button::primary),
         text(status_str),
     ]
-    .spacing(vox_theme::SPACING);
+    .spacing(vox_theme::SPACING)
+    .align_y(iced::Alignment::Center);
 
     scrollable(
-        column![
-            audio_section,
-            transcription_section,
-            summarization_section,
-            storage_section,
-            notifications_section,
-            about_section,
-            save_row,
-        ]
-        .spacing(vox_theme::SECTION_SPACING)
-        .width(Fill),
+        container(
+            column![
+                audio_section,
+                transcription_section,
+                summarization_section,
+                storage_section,
+                notifications_section,
+                about_section,
+                save_row,
+            ]
+            .spacing(vox_theme::SECTION_SPACING)
+            .width(Fill),
+        )
+        .max_width(600)
+        .center_x(Fill),
     )
     .into()
 }
@@ -824,13 +975,17 @@ fn view_session_detail(session: &Session) -> Element<'_, Message> {
                     seg.start_time as u64 / 60,
                     seg.start_time as u64 % 60
                 );
+                let speaker_color = vox_theme::speaker_color(&seg.speaker);
                 col.push(
                     row![
                         text(timestamp)
                             .size(11u32)
                             .font(Font::MONOSPACE)
                             .width(60u32),
-                        text(seg.speaker.clone()).size(12u32).width(80u32),
+                        text(seg.speaker.clone())
+                            .size(12u32)
+                            .width(80u32)
+                            .color(speaker_color),
                         text(seg.text.clone()).size(13u32),
                     ]
                     .spacing(8u32),
@@ -862,10 +1017,14 @@ fn view_session_detail(session: &Session) -> Element<'_, Message> {
 // Widget helpers
 // ──────────────────────────────────────────────────────────────────────────────
 
-/// Wrap content in a titled section column.
+/// Wrap content in a titled section column with an 18pt header.
+///
+/// The section title is rendered at a slightly larger size so it reads
+/// distinctly from field labels, and a horizontal rule is drawn beneath it for
+/// visual separation.
 fn section_column<'a>(title: &'a str, content: Column<'a, Message>) -> Element<'a, Message> {
     column![
-        text(title).size(15u32),
+        text(title).size(18u32),
         rule::horizontal(1),
         content.spacing(vox_theme::SPACING),
     ]
@@ -873,27 +1032,94 @@ fn section_column<'a>(title: &'a str, content: Column<'a, Message>) -> Element<'
     .into()
 }
 
-/// A full-width text input field with a placeholder label.
-fn labeled_text_input<'a, F>(label: &'a str, value: &'a str, on_change: F) -> Element<'a, Message>
+/// A text input with a short label above it and a description as the placeholder.
+///
+/// Uses a vertical (stacked) layout so the field spans the full available width
+/// without clipping the label, regardless of window size.
+fn stacked_text_input<'a, F>(
+    label: &'a str,
+    placeholder: &'a str,
+    value: &'a str,
+    on_change: F,
+) -> Element<'a, Message>
 where
     F: Fn(String) -> Message + 'a,
 {
-    text_input(label, value)
-        .on_input(on_change)
-        .width(Fill)
-        .into()
+    column![
+        text(label).size(13u32),
+        text_input(placeholder, value)
+            .on_input(on_change)
+            .width(Fill),
+    ]
+    .spacing(vox_theme::SPACING / 2.0)
+    .into()
+}
+
+/// A labelled pick-list row using proportional widths.
+///
+/// The label occupies one third of the row and the picker takes the remaining
+/// two thirds, both scaling proportionally with the window width so neither
+/// component is clipped.
+fn pick_row<'a>(label: &'a str, picker: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+    row![
+        text(label)
+            .size(13u32)
+            .width(Length::FillPortion(1)),
+        container(picker.into()).width(Length::FillPortion(2)),
+    ]
+    .spacing(vox_theme::SPACING)
+    .align_y(iced::Alignment::Center)
+    .into()
+}
+
+/// A labelled toggler row using proportional widths.
+///
+/// The label occupies three quarters of the row; the toggler sits at the right.
+fn toggle_row<'a, F>(label: &'a str, value: bool, on_toggle: F) -> Element<'a, Message>
+where
+    F: Fn(bool) -> Message + 'a,
+{
+    row![
+        text(label)
+            .size(13u32)
+            .width(Length::FillPortion(3)),
+        toggler(value)
+            .on_toggle(on_toggle),
+    ]
+    .spacing(vox_theme::SPACING)
+    .align_y(iced::Alignment::Center)
+    .into()
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Theme helper
 // ──────────────────────────────────────────────────────────────────────────────
 
-/// Return the application theme.
+/// Return the application theme, adapting to the system's dark/light preference.
 ///
-/// Uses the system-detected theme when `linux-theme-detection` is enabled,
-/// otherwise falls back to `TokyoNight` (dark).
+/// Detection heuristics (in priority order):
+/// 1. `GTK_THEME` env var — if it contains `"dark"` (case-insensitive), use
+///    the dark theme.
+/// 2. `COLORFGBG` env var — a value ending in `;0` or `;black` indicates a
+///    dark terminal background, which is a reasonable proxy.
+/// 3. Fall back to the light theme.
+///
+/// iced 0.14 does not expose automatic system-theme integration, so this is a
+/// best-effort heuristic suitable for GNOME/GTK desktops and KDE with
+/// `GTK_THEME` set.
 pub fn theme(_state: &VoxAppState) -> Theme {
-    Theme::TokyoNight
+    let is_dark = std::env::var("GTK_THEME")
+        .map(|t| t.to_ascii_lowercase().contains("dark"))
+        .unwrap_or(false)
+        || std::env::var("COLORFGBG")
+            .map(|v| v.ends_with(";0") || v.ends_with(";black"))
+            .unwrap_or(false);
+
+    if is_dark {
+        Theme::Dark
+    } else {
+        Theme::Light
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -925,6 +1151,29 @@ pub fn run() -> iced::Result {
 // ──────────────────────────────────────────────────────────────────────────────
 // Internal helpers
 // ──────────────────────────────────────────────────────────────────────────────
+
+/// Enumerate PipeWire audio sources for the settings dropdowns.
+///
+/// Returns an empty vec when the `pw` feature is not enabled or when the
+/// PipeWire daemon is unreachable.
+fn enumerate_pipewire_sources() -> Vec<vox_capture::StreamInfo> {
+    #[cfg(feature = "pw")]
+    {
+        match vox_capture::PipeWireSource::enumerate_streams(
+            &vox_capture::StreamFilter::default(),
+        ) {
+            Ok(streams) => streams,
+            Err(e) => {
+                warn!("failed to enumerate PipeWire sources: {e}");
+                vec![]
+            }
+        }
+    }
+    #[cfg(not(feature = "pw"))]
+    {
+        vec![]
+    }
+}
 
 /// Load all sessions from the store, returning an empty vec on error.
 fn load_sessions_from_store(data_dir: &str) -> Vec<Session> {

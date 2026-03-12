@@ -3788,7 +3788,9 @@ dependencies = [
  "base64",
  "bytes",
  "encoding_rs",
+ "futures-channel",
  "futures-core",
+ "futures-util",
  "h2",
  "http",
  "http-body",
@@ -5088,6 +5090,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
  "uuid",
+ "vox-capture",
  "vox-core",
  "vox-storage",
 ]
@@ -5136,6 +5139,7 @@ dependencies = [
 name = "vox-transcribe"
 version = "0.1.0"
 dependencies = [
+ "reqwest",
  "tempfile",
  "thiserror 2.0.18",
  "tracing",

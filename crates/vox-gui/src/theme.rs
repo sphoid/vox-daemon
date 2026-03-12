@@ -51,10 +51,10 @@ pub const SPACING: f32 = 8.0;
 pub const SECTION_SPACING: f32 = 20.0;
 
 /// Minimum width of the settings window (pixels).
-pub const WINDOW_MIN_WIDTH: u32 = 640;
+pub const WINDOW_MIN_WIDTH: u32 = 800;
 
 /// Minimum height of the settings window (pixels).
-pub const WINDOW_MIN_HEIGHT: u32 = 480;
+pub const WINDOW_MIN_HEIGHT: u32 = 600;
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Helpers

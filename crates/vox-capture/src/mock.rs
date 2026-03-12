@@ -182,6 +182,7 @@ fn default_fake_streams() -> Vec<StreamInfo> {
         StreamInfo {
             node_id: 1,
             name: "mock_microphone".to_owned(),
+            description: Some("Mock Microphone".to_owned()),
             application_name: None,
             media_class: Some("Audio/Source".to_owned()),
             suggested_role: Some(StreamRole::Microphone),
@@ -189,6 +190,7 @@ fn default_fake_streams() -> Vec<StreamInfo> {
         StreamInfo {
             node_id: 2,
             name: "mock_app_audio".to_owned(),
+            description: Some("Mock App Audio".to_owned()),
             application_name: Some("MockApp".to_owned()),
             media_class: Some("Stream/Input/Audio".to_owned()),
             suggested_role: Some(StreamRole::Application),

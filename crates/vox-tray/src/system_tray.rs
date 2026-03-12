@@ -548,6 +548,25 @@ fn run_gtk_loop(
                 tracing::debug!(?status, "tray status update");
                 current_status.store(encode_status(status), Ordering::Relaxed);
 
+                // Update menu item enabled/disabled states to match the new status.
+                match status {
+                    DaemonStatus::Idle => {
+                        start_item.set_enabled(true);
+                        stop_item.set_enabled(false);
+                        pause_item.set_enabled(false);
+                    }
+                    DaemonStatus::Recording => {
+                        start_item.set_enabled(false);
+                        stop_item.set_enabled(true);
+                        pause_item.set_enabled(true);
+                    }
+                    DaemonStatus::Processing => {
+                        start_item.set_enabled(false);
+                        stop_item.set_enabled(false);
+                        pause_item.set_enabled(false);
+                    }
+                }
+
                 // Update the tray icon colour.
                 let new_icon = match status {
                     DaemonStatus::Idle => icon_from_png(&idle_png),
@@ -556,8 +575,17 @@ fn run_gtk_loop(
                 };
                 match new_icon {
                     Ok(icon) => {
-                        if let Err(e) = tray_icon.borrow_mut().set_icon(Some(icon)) {
+                        let ti = tray_icon.borrow_mut();
+                        if let Err(e) = ti.set_icon(Some(icon)) {
                             tracing::warn!("failed to set tray icon: {e}");
+                        }
+                        let tooltip = match status {
+                            DaemonStatus::Idle => "Vox Daemon",
+                            DaemonStatus::Recording => "Vox Daemon — Recording",
+                            DaemonStatus::Processing => "Vox Daemon — Processing",
+                        };
+                        if let Err(e) = ti.set_tooltip(Some(tooltip)) {
+                            tracing::warn!("failed to set tray tooltip: {e}");
                         }
                         tracing::debug!("icon updated for status {:?}", status);
                     }

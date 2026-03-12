@@ -186,3 +186,60 @@ Non-blocking issues to address (recommended):
 4. Tray icon swap not wired up (system_tray.rs:549-556)
 5. Notifications not clickable (desktop.rs)
 6. Speaker color-coding not applied in transcript viewer (app.rs:829)
+
+---
+
+## QA Re-verification: Integration Gap Fixes
+
+**Date:** 2026-03-11
+**Crate(s):** vox-daemon, vox-gui, vox-transcribe, vox-notify
+**Reviewer:** qa-reviewer
+
+### Summary
+
+Re-verification of 12 previously identified integration gaps. The review checks
+whether each gap has been properly resolved in the current codebase.
+
+### Build Verification
+
+- `cargo check -p vox-daemon`: **PASS** (compiles without features)
+- `cargo check -p vox-gui`: **PASS**
+- `cargo check -p vox-transcribe`: **PASS**
+- `cargo test --workspace`: **PASS** (all tests pass)
+
+### Gap Status
+
+| # | Gap | Status | Evidence |
+|---|-----|--------|----------|
+| 1 | Recording uses `MockAudioSource` -- should use `PipeWireSource` with `pw` feature | **FIXED** | `vox-daemon/src/recording.rs:89-93` uses `#[cfg(feature = "pw")]` to select `PipeWireSource::new()` and falls back to `MockAudioSource` only when the feature is absent. |
+| 2 | Transcription uses `StubTranscriber` -- should use `WhisperTranscriber` with `whisper` feature | **FIXED** | `vox-daemon/src/recording.rs:190-202` uses `#[cfg(feature = "whisper")]` to construct `WhisperTranscriber::from_config()` and falls back to `StubTranscriber` only without the feature. |
+| 3 | Notifications use `StubNotifier` -- should use `DesktopNotifier` | **FIXED** | `vox-daemon/src/daemon.rs:37-39` unconditionally creates `DesktopNotifier::new(config.notifications.clone())`. `StubNotifier` is no longer used in production daemon code. |
+| 4 | Auto-summarization never triggers -- should trigger after recording when config flag is set | **FIXED** | `vox-daemon/src/recording.rs:55-67` checks `config.summarization.auto_summarize && !session.transcript.is_empty()` and calls `auto_summarize()`, which creates a summarizer via `vox_summarize::create_summarizer()` and stores the result back to the session. The session is re-saved after summarization. |
+| 5 | Recording blocks tray event loop -- should be spawned as async task | **FIXED** | `vox-daemon/src/daemon.rs:146-159` spawns the recording via `tokio::spawn(async move { recording::record_session(...).await })` and stores the `JoinHandle` in a `RecordingTask` struct. The tray event loop continues polling independently at `daemon.rs:74`. |
+| 6 | Speaker name edits not persisted -- should save back to disk | **FIXED** | `crates/vox-gui/src/app.rs:471-495` handles `Message::SpeakerNameEdited` by updating the in-memory session, cloning it, and performing an async `JsonFileStore::save()` call. The `SpeakerNamesSaved` result message logs success or failure. |
+| 7 | Markdown export does not save to file -- should write .md file | **FIXED** | `crates/vox-gui/src/app.rs:400-425` handles `Message::ExportSelectedSession` by calling `store.export_markdown(id)` and then writing the result to `{data_dir}/{id}.md` via `std::fs::write()`. The CLI `export` command at `vox-daemon/src/main.rs:276-290` still only prints to stdout (no file write), which is appropriate for a CLI tool. |
+| 8 | Speaker colors not applied -- should use `speaker_color()` in transcript view | **FIXED** | `crates/vox-gui/src/app.rs:865` applies `.color(speaker_color)` where `speaker_color` is obtained from `vox_theme::speaker_color(&seg.speaker)` at line 865. The `speaker_color()` function at `crates/vox-gui/src/theme.rs:68-74` maps `"You"` to blue, remote/speaker labels to green, and others to grey. |
+| 9 | Stop/Pause recording -- should have a stop mechanism | **FIXED (stop) / OPEN (pause)** | Stop: `RecordingTask` struct at `daemon.rs:15-22` holds an `Arc<AtomicBool>` stop flag. `TrayEvent::StopRecording` at `daemon.rs:162-185` sets the flag and awaits the task. The recording loop at `recording.rs:110-115` polls the flag every iteration. Pause: `TrayEvent::PauseRecording` at `daemon.rs:187-189` logs "not yet implemented" and does nothing. This is a known gap. |
+| 10 | Model download on first use -- should auto-download from Hugging Face | **FIXED** | `crates/vox-transcribe/src/model.rs:113-129` implements `resolve_model_path()` which checks `$XDG_CACHE_HOME/vox-daemon/models/ggml-{size}.bin` and calls `download_model()` if the file is absent. `download_model()` at lines 169-303 performs a blocking HTTP GET from `huggingface.co/ggerganov/whisper.cpp`, streams to a temporary `.bin.tmp` file, reports progress via `tracing::info` every 50 MiB, and renames atomically on success. Comprehensive tests exist (lines 316-487). |
+| 11 | Raw audio retention -- check if implemented | **OPEN** | The `retain_audio` config field exists in `StorageConfig` (`crates/vox-core/src/config.rs:178`) and the GUI has a toggle for it (`crates/vox-gui/src/app.rs:679`). However, the recording pipeline at `vox-daemon/src/recording.rs` never reads this flag and never saves raw audio data to disk. Audio samples are consumed during transcription and then dropped. The feature is config-plumbed but not functionally implemented. |
+| 12 | Clickable notifications -- check if implemented | **OPEN** | `crates/vox-notify/src/desktop.rs` sends fire-and-forget notifications via `Notification::new().show()`. No `.action("default", "Open")` call is made, no `NotificationHandle` is retained, and no D-Bus callback is registered. Clicking a notification performs no application-specific action. This was previously identified as a gap and remains unaddressed. |
+
+### New Issues Introduced
+
+1. **[SEVERITY: LOW]** The `capture_audio()` function at `recording.rs:86` does not pass mic/app override arguments through to the audio source. The `_mic_override` and `_app_override` parameters of `record_session` (line 26) are prefixed with underscores and silently ignored. When a user runs `vox-daemon record --mic <id> --app <id>`, the overrides have no effect.
+   - Location: `/workspace/vox-daemon/src/recording.rs:23-29`
+   - Fix suggestion: Pass the override values to `PipeWireSource::new()` or use them in stream selection.
+
+2. **[SEVERITY: LOW]** `PauseRecording` event handler at `daemon.rs:187-189` does nothing. While marked as "not yet implemented", it silently swallows the event without any user-visible feedback (no notification, no tray status update). A user clicking "Pause" in the tray menu would see no response.
+   - Location: `/workspace/vox-daemon/src/daemon.rs:187-189`
+
+### Verdict
+
+**8 of 12 gaps are FIXED.** 2 gaps are partially fixed (stop works, pause does not). 2 gaps remain OPEN:
+
+- **Raw audio retention** (gap 11): config plumbing exists but no audio data is ever saved to disk.
+- **Clickable notifications** (gap 12): notifications are sent but not interactive.
+
+Additionally, 2 low-severity new issues were found (mic/app overrides ignored; pause is a no-op).
+
+None of the open gaps cause compilation failures or test regressions. They represent missing functionality rather than broken functionality.

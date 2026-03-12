@@ -33,7 +33,7 @@ uuid = { workspace = true }
 [features]
 gtk = ["vox-tray/gtk"]
 ui = ["dep:vox-gui"]
-pw = ["vox-capture/pw"]
+pw = ["vox-capture/pw", "vox-gui?/pw"]
 whisper = ["vox-transcribe/whisper"]
 cuda = ["vox-transcribe/cuda"]
 hipblas = ["vox-transcribe/hipblas"]

@@ -76,6 +76,10 @@ pub fn list_streams(timeout: Duration) -> Result<Vec<StreamInfo>, CaptureError> 
                 .or_else(|| props.get("object.id"))
                 .unwrap_or("unknown")
                 .to_owned();
+            let description = props
+                .get("node.description")
+                .or_else(|| props.get("node.nick"))
+                .map(str::to_owned);
             let app = props.get("application.name").map(str::to_owned);
             let media_class = props.get("media.class").map(str::to_owned);
 
@@ -84,6 +88,7 @@ pub fn list_streams(timeout: Duration) -> Result<Vec<StreamInfo>, CaptureError> 
             let info = StreamInfo {
                 node_id: global.id,
                 name,
+                description,
                 application_name: app,
                 media_class,
                 suggested_role,

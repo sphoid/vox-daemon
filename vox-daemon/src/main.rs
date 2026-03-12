@@ -121,7 +121,7 @@ async fn async_main(cli: Cli) -> Result<()> {
         }
         Command::Record { mic, app } => {
             tracing::info!("starting recording session");
-            recording::record_session(config, mic, app).await?;
+            recording::record_session(config, mic, app, None).await?;
         }
         Command::ListSources => {
             list_sources()?;
@@ -162,23 +162,41 @@ async fn async_main(cli: Cli) -> Result<()> {
 fn list_sources() -> Result<()> {
     use vox_capture::{AudioSource, StreamFilter};
 
-    let mut source = vox_capture::mock::MockAudioSource::new();
-    let streams = source
-        .list_streams(&StreamFilter::default())
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    #[cfg(feature = "pw")]
+    let streams = {
+        let mut source = vox_capture::pw::PipeWireSource::new(vec![])
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        source
+            .list_streams(&StreamFilter::default())
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+    };
+    #[cfg(not(feature = "pw"))]
+    let streams = {
+        let mut source = vox_capture::mock::MockAudioSource::new();
+        source
+            .list_streams(&StreamFilter::default())
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+    };
 
     if streams.is_empty() {
         println!("No audio sources found. Is PipeWire running?");
         return Ok(());
     }
 
-    println!("{:<8} {:<30} {:<12} App", "Node ID", "Name", "Class");
-    println!("{}", "-".repeat(70));
+    println!(
+        "{:<8} {:<40} {:<16} {}",
+        "Node ID", "Name", "Class", "App"
+    );
+    println!("{}", "-".repeat(85));
     for stream in &streams {
+        let display_name = stream
+            .description
+            .as_deref()
+            .unwrap_or(&stream.name);
         println!(
-            "{:<8} {:<30} {:<12} {}",
+            "{:<8} {:<40} {:<16} {}",
             stream.node_id,
-            stream.name,
+            display_name,
             stream.media_class.as_deref().unwrap_or("—"),
             stream.application_name.as_deref().unwrap_or("—"),
         );

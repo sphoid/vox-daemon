@@ -77,8 +77,14 @@ pub struct StreamInfo {
     /// `PipeWire` node ID.
     pub node_id: u32,
 
-    /// Human-readable node name (e.g., `"alsa_input.pci-0000_00_1f.3.analog-stereo"`).
+    /// Internal node name (e.g., `"alsa_input.pci-0000_00_1f.3.analog-stereo"`).
     pub name: String,
+
+    /// Human-friendly description (e.g., `"Built-in Audio Analog Stereo"`).
+    ///
+    /// Sourced from the `node.description` or `node.nick` PipeWire property.
+    /// Falls back to [`name`](Self::name) if neither is available.
+    pub description: Option<String>,
 
     /// Application/process name that owns this node, if available.
     pub application_name: Option<String>,
@@ -188,6 +194,7 @@ mod tests {
         let info = StreamInfo {
             node_id: 1,
             name: "test".to_owned(),
+            description: None,
             application_name: Some("zoom".to_owned()),
             media_class: Some("Audio/Source".to_owned()),
             suggested_role: None,
@@ -204,6 +211,7 @@ mod tests {
         let info = StreamInfo {
             node_id: 2,
             name: "zoom-audio".to_owned(),
+            description: None,
             application_name: Some("Zoom".to_owned()),
             media_class: None,
             suggested_role: None,
@@ -220,6 +228,7 @@ mod tests {
         let info = StreamInfo {
             node_id: 1,
             name: "mic".to_owned(),
+            description: None,
             application_name: None,
             media_class: None,
             suggested_role: None,
@@ -232,6 +241,7 @@ mod tests {
         let info = StreamInfo {
             node_id: 3,
             name: "alsa_input.pci".to_owned(),
+            description: None,
             application_name: None,
             media_class: Some("Audio/Source".to_owned()),
             suggested_role: None,
@@ -244,6 +254,7 @@ mod tests {
         let info = StreamInfo {
             node_id: 4,
             name: "pw-stream".to_owned(),
+            description: None,
             application_name: Some("zoom".to_owned()),
             media_class: Some("Stream/Input/Audio".to_owned()),
             suggested_role: None,

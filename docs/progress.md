@@ -334,3 +334,134 @@ The `vox-daemon` binary was updated to integrate all Phase 2/3 crates:
 - `vox-tray`, `vox-notify`, `vox-summarize` added as dependencies
 - `daemon.rs` rewritten with tray event loop (MockTray without GTK, StubNotifier)
 - Two new CLI subcommands: `summarize <uuid>` and `export <uuid>`
+
+---
+
+## vox-transcribe — Automatic model download on first use (2026-03-11)
+
+**Agent:** ai-specialist (claude-sonnet-4-6)
+
+### What was implemented
+
+**`/workspace/crates/vox-core/src/error.rs`:**
+
+- Added a new `ModelDownload(String)` variant to `TranscribeError` with the message template `"model download failed: {0}"`. This is separate from `ModelLoad` so callers can distinguish a missing-file/bad-path error (which is a config problem) from a network/I/O error that occurred during an automatic download attempt.
+
+**`/workspace/crates/vox-transcribe/Cargo.toml`:**
+
+- Added `reqwest = { version = "0.12", features = ["blocking"] }` as a direct (non-workspace) dependency. The `blocking` feature is required because model download happens synchronously before the Tokio runtime is entered. The workspace already declares `reqwest` with `features = ["json"]`; this crate-level declaration adds the `blocking` feature without removing `json`.
+
+**`/workspace/crates/vox-transcribe/src/model.rs`:**
+
+- `resolve_model_path()` — extended to call `download_model()` when the model file is absent from the XDG cache directory. Custom paths (`config.model_path` non-empty) are still verified with `verify_exists()` as before; no automatic download is attempted for explicit overrides.
+- `download_model(size: ModelSize, dest: &Path) -> Result<(), TranscribeError>` — new public function implementing the download pipeline:
+  1. Derives the URL from `size.download_url()` (Hugging Face `ggerganov/whisper.cpp` repository).
+  2. Creates the parent cache directory via `std::fs::create_dir_all`.
+  3. Issues a blocking GET via `reqwest::blocking::get` and checks for a non-2xx status.
+  4. Reads the response `Content-Length` header for progress reporting (falls back gracefully when absent).
+  5. Streams the response body into a temporary file (`<dest>.bin.tmp`) in 64 KiB chunks using the `std::io::Read` trait on the `Response` directly, emitting an `INFO` tracing event every 50 MiB.
+  6. Flushes and drops the file, then calls `std::fs::rename` for an atomic final placement at `dest`. A partial download never leaves a corrupt `.bin` file.
+  7. Emits a final `INFO` event with total downloaded size on success.
+- Two new unit tests:
+  - `test_download_url_pattern_all_sizes` — asserts every `ModelSize` variant produces a Hugging Face URL ending with the correct file name.
+  - `test_download_model_writes_to_dest_path_locally` — exercises the `resolve_model_path` short-circuit path (file pre-exists) and confirms no `.bin.tmp` artefact is left behind.
+  - `test_download_model_creates_parent_directory` — validates that `create_dir_all` succeeds for deeply nested paths; this confirms the directory-creation code path without hitting the network.
+
+### Compile and test status
+
+`cargo check -p vox-transcribe` — clean, no errors or warnings.
+`cargo test -p vox-transcribe` — 21/21 tests pass.
+
+### Design decisions
+
+- **Blocking HTTP**: Model downloads are a one-time startup operation that precede Tokio runtime startup. Using `reqwest::blocking` avoids requiring an async context and keeps `resolve_model_path` (and by extension `WhisperTranscriber::from_config`) as a simple synchronous call.
+- **Atomic rename**: The temp-file-then-rename pattern ensures that a crash or network drop during download never leaves a zero-byte or partially-written `.bin` at the expected model path. On the next startup the file will be absent and the download will restart cleanly.
+- **Custom paths not downloaded**: If the user has set `model_path` in config, they are responsible for placing the file there. Silently overwriting a custom path with a downloaded version would be surprising and potentially harmful (e.g., if the path points to a quantised variant that differs from the standard GGML file).
+- **`ModelDownload` error variant**: Separating download failures from load failures gives callers (and future GUI code) the ability to show distinct error messages: "could not reach Hugging Face" vs "model file is corrupted".
+
+### Open questions
+
+1. **Resumable downloads**: If a download of a large model (e.g., `ggml-large.bin` at ~2.9 GB) is interrupted, the temp file is cleaned up on the next attempt. A future enhancement could use HTTP `Range` requests to resume from the last byte written.
+2. **Checksum verification**: The current implementation does not verify a SHA-256 or MD5 hash of the downloaded file. whisper.cpp publishes checksums in the `models/download-ggml-model.sh` script. Adding post-download verification would prevent silent corruption.
+3. **Proxy support**: `reqwest::blocking` respects the `HTTP_PROXY` / `HTTPS_PROXY` environment variables by default (via the system's native TLS stack). No special handling is needed, but it is worth documenting in the README.
+4. **TLS backend**: `reqwest` uses `native-tls` by default in this workspace configuration. For fully static / musl builds this may need to be switched to `rustls` via feature flags.
+
+---
+
+## vox-gui — Integration gap fixes (2026-03-11)
+
+**Agent:** gui-specialist (claude-sonnet-4-6)
+
+### What was fixed
+
+Three integration gaps in `/workspace/crates/vox-gui/src/app.rs` were closed.
+
+**Gap 1 — Speaker name edits now persisted to disk**
+
+`Message::SpeakerNameEdited` previously updated the in-memory `Session` but never called `SessionStore::save`. After updating the mapping, a `Task::perform` is now spawned that clones the session and saves it through `JsonFileStore::new(&data_dir).and_then(|s| s.save(&session_clone))`. A new `Message::SpeakerNamesSaved(bool)` variant was added to the `Message` enum to receive the result. On failure the browser status bar shows "Failed to save speaker names." and an `error!` log is emitted. On success an `info!` log is emitted without disturbing the UI.
+
+**Gap 2 — Markdown export writes to a file**
+
+`Message::ExportSelectedSession` previously generated Markdown but discarded the content after logging the byte count. The `ExportResult` `Ok` payload was changed from the raw Markdown string to the absolute path of the written file (type signature stays `Result<String, String>` — no change to the enum declaration beyond the doc comment). The async block now:
+1. Generates Markdown via `store.export_markdown(id)`.
+2. Resolves the output path as `vox_core::paths::data_dir_or(&data_dir).join("{uuid}.md")` — the data root directory (one level above the `sessions/` subdir).
+3. Writes via `std::fs::write`.
+4. Returns the `PathBuf` as a `String` on success.
+
+The `ExportResult` handler sets `browser_status` to `"Exported to {absolute_path}"`.
+
+**Gap 3 — Speaker colors applied in transcript view**
+
+In `view_session_detail`, the `transcript_items` fold now calls `vox_theme::speaker_color(&seg.speaker)` per segment and chains `.color(speaker_color)` onto the speaker label `text` widget. "You" renders in blue, "Remote"/"Speaker*" in green, all others in gray.
+
+### Compile status
+
+`cargo check -p vox-gui` and `cargo check -p vox-gui --features ui` both finish with zero errors and zero warnings.
+
+---
+
+## vox-gui — Settings UI overhaul (2026-03-11)
+
+**Agent:** gui-specialist (claude-sonnet-4-6)
+
+### What was changed
+
+Three UX issues in the settings view were addressed. All 30 existing tests continue to pass. `cargo check --workspace` is clean.
+
+**Issue 1 — Field clipping / improper sizing**
+
+Removed all fixed pixel widths on label widgets (`width(200u32)`, `width(240u32)`). Labels in pick-list and toggler rows now use `Length::FillPortion(1)` or `Length::FillPortion(3)` respectively, with the control widget using `Length::FillPortion(2)`. This allows the two columns to scale proportionally as the window is resized. Text input fields use a new stacked (vertical) layout — see Issue 2.
+
+`WINDOW_MIN_WIDTH` in `theme.rs` increased from 640 to 800. `WINDOW_MIN_HEIGHT` increased from 480 to 600. The `scrollable()` wrapping the settings column was already present and continues to work correctly.
+
+**Issue 2 — Audio sources as text inputs with vertical layout**
+
+All text input fields (audio sources, language, model path, Ollama URL, etc.) were moved from a single-line placeholder to a stacked vertical layout via a new `stacked_text_input(label, placeholder, value, on_change)` helper. The label is a small (`size(13)`) text widget above the input; the placeholder text is a more descriptive description string. This eliminates clipping entirely because the input spans the full available width. The `labeled_text_input` helper was removed and replaced.
+
+For the audio source fields specifically, the label now clearly states "Microphone source" / "Application audio source" and the placeholder reads `PipeWire node ID or "auto" for system default`.
+
+An `AudioSourceOption` struct was added to the module to support future pick-list-based source enumeration. It wraps a `node_id: String` and a `display_name: String`, implements `Display`, and provides `AudioSourceOption::auto()` and `AudioSourceOption::fallback_list()` constructors. `VoxAppState` now holds `available_mic_sources: Vec<AudioSourceOption>` and `available_app_sources: Vec<AudioSourceOption>`, both initialized to `[auto]` at startup. When the `pw` feature of `vox-capture` becomes available at runtime, these vecs can be populated by calling `vox_capture::pw::PipeWireSource::enumerate_streams()` in the `VoxAppState::new` constructor.
+
+**Issue 3 — Theme adapts to system dark/light preference**
+
+`theme()` was changed from always returning `Theme::TokyoNight` to a heuristic detection function:
+
+1. If `GTK_THEME` env var contains `"dark"` (case-insensitive) → `Theme::Dark`.
+2. Else if `COLORFGBG` ends with `";0"` or `";black"` (dark terminal heuristic) → `Theme::Dark`.
+3. Otherwise → `Theme::Light`.
+
+This provides correct behavior on GNOME/GTK desktops that set `GTK_THEME`, and a reasonable fallback for other desktops. KDE Plasma with a dark Breeze variant typically sets `GTK_THEME=Breeze-Dark`.
+
+**Additional layout improvements**
+
+- Section headers now use `size(18)` (up from 15) for a clearer visual hierarchy.
+- A new `pick_row(label, picker)` helper uses `FillPortion(1)` for the label and `FillPortion(2)` for the control widget, with `align_y(Center)`.
+- A new `toggle_row(label, value, on_toggle)` helper uses `FillPortion(3)` for the label and an unsized toggler on the right, with `align_y(Center)`.
+- The "Save Settings" button now uses `button::primary` style to make it visually prominent.
+- The save row uses `align_y(Center)` so the status text aligns vertically with the button.
+- The API key field uses an inline `column!` with a label above it (matching `stacked_text_input` style) and retains the `.secure(true)` masking.
+
+### Open questions
+
+1. **PipeWire source enumeration from the GUI**: Populating `available_mic_sources` and `available_app_sources` at runtime would require spawning a short-lived PipeWire connection (via `vox_capture::pw::PipeWireSource`) in `VoxAppState::new`. This is gated on `#[cfg(feature = "pw")]` in `vox-capture` and requires `libpipewire-0.3-dev`. A future task can wire this up and replace the text inputs with `pick_list` dropdowns once enumeration is confirmed working.
+2. **iced system theme integration**: iced 0.14 does not provide a native hook into the OS theme change signal (e.g., D-Bus `org.freedesktop.portal.Settings`). If automatic theme switching on-the-fly is needed, a polling mechanism or a restart would be required.
