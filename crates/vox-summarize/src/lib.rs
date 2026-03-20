@@ -37,12 +37,14 @@
 //! | [`prompt`] | Builds system + user prompts from transcript segments |
 //! | [`parse`] | Parses LLM text responses into [`Summary`] structs |
 //! | [`client`] | [`OpenAiClient`] — HTTP client for any OpenAI-compatible API |
+//! | [`ollama`] | [`OllamaClient`] — native Ollama `/api/chat` client |
 //! | [`factory`] | [`create_summarizer`] factory function |
 //! | [`stub`] | [`StubSummarizer`] — test-friendly no-op implementation |
 
 pub mod client;
 pub mod error;
 pub mod factory;
+pub mod ollama;
 pub mod parse;
 pub mod prompt;
 pub mod stub;
@@ -52,5 +54,6 @@ pub mod traits;
 pub use client::OpenAiClient;
 pub use error::SummarizeError;
 pub use factory::create_summarizer;
+pub use ollama::OllamaClient;
 pub use stub::StubSummarizer;
 pub use traits::Summarizer;

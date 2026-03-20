@@ -26,7 +26,7 @@ use iced::{Element, Fill, Font, Length, Size, Task, Theme};
 use tracing::{error, info, warn};
 use uuid::Uuid;
 use vox_core::config::AppConfig;
-use vox_core::session::Session;
+use vox_core::session::{Session, Summary};
 use vox_storage::store::{JsonFileStore, SessionStore};
 
 use crate::browser::{SessionListEntry, build_session_list};
@@ -186,6 +186,14 @@ pub enum Message {
     SessionsLoaded(Vec<Session>),
     /// Speaker names were persisted to disk (carries success flag).
     SpeakerNamesSaved(bool),
+
+    // ── Browser: summarization ───────────────────────────────────────────
+    /// The user requested manual AI summary generation for the selected session.
+    GenerateSummary,
+    /// Summary generation completed (carries the summary or an error message).
+    SummaryGenerated(Result<Box<Summary>, String>),
+    /// The summary was persisted to disk after generation (carries success flag).
+    SummarySaved(bool),
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -231,6 +239,9 @@ pub struct VoxAppState {
 
     /// Status message shown in the browser (e.g. "Exported!" or an error).
     pub browser_status: Option<String>,
+
+    /// Whether a summary generation is currently in progress.
+    pub summarizing: bool,
 }
 
 impl VoxAppState {
@@ -283,6 +294,7 @@ impl VoxAppState {
             selected_session_id: None,
             selected_session: None,
             browser_status: None,
+            summarizing: false,
         }
     }
 
@@ -583,6 +595,81 @@ pub fn update(state: &mut VoxAppState, message: Message) -> Task<Message> {
         Message::SessionsLoaded(sessions) => {
             state.session_list = build_session_list(&sessions);
             state.all_sessions = sessions;
+            Task::none()
+        }
+
+        // ── Browser: summarization ───────────────────────────────────────
+        Message::GenerateSummary => {
+            let Some(ref session) = state.selected_session else {
+                return Task::none();
+            };
+            if session.summary.is_some() || session.transcript.is_empty() {
+                return Task::none();
+            }
+            state.summarizing = true;
+            state.browser_status = Some("Generating summary…".to_owned());
+            let transcript = session.transcript.clone();
+            let config = AppConfig::load().unwrap_or_else(|e| {
+                warn!("failed to load config for summarization: {e}");
+                AppConfig::default()
+            });
+            Task::perform(
+                async move {
+                    let summarizer = vox_summarize::create_summarizer(&config.summarization)
+                        .map_err(|e| e.to_string())?;
+                    let summary = summarizer
+                        .summarize(&transcript)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    Ok(Box::new(summary))
+                },
+                Message::SummaryGenerated,
+            )
+        }
+        Message::SummaryGenerated(result) => {
+            state.summarizing = false;
+            match result {
+                Ok(summary) => {
+                    info!("summary generated successfully");
+                    if let Some(ref mut session) = state.selected_session {
+                        session.summary = Some(*summary);
+                        // Persist the session with the new summary.
+                        let session_clone = session.clone();
+                        let data_dir = state.settings.storage.data_dir.clone();
+                        state.browser_status = Some("Summary generated.".to_owned());
+                        // Also update the list entry preview.
+                        if let Some(entry) = state
+                            .session_list
+                            .iter_mut()
+                            .find(|e| e.id == session_clone.id)
+                        {
+                            *entry = SessionListEntry::from_session(&session_clone);
+                        }
+                        return Task::perform(
+                            async move {
+                                JsonFileStore::new(&data_dir)
+                                    .and_then(|store| store.save(&session_clone))
+                                    .is_ok()
+                            },
+                            Message::SummarySaved,
+                        );
+                    }
+                    Task::none()
+                }
+                Err(e) => {
+                    error!("summary generation failed: {e}");
+                    state.browser_status = Some(format!("Summarization failed: {e}"));
+                    Task::none()
+                }
+            }
+        }
+        Message::SummarySaved(ok) => {
+            if ok {
+                info!("summary persisted to disk");
+            } else {
+                error!("failed to persist summary to disk");
+                state.browser_status = Some("Failed to save summary.".to_owned());
+            }
             Task::none()
         }
     }
@@ -911,7 +998,7 @@ fn view_browser(state: &VoxAppState) -> Element<'_, Message> {
 
     // ── Detail panel ──────────────────────────────────────────────────────
     let detail: Element<'_, Message> = if let Some(ref session) = state.selected_session {
-        view_session_detail(session)
+        view_session_detail(session, state.summarizing)
     } else {
         container(text("Select a session to view its transcript."))
             .center_x(Fill)
@@ -937,13 +1024,73 @@ fn view_browser(state: &VoxAppState) -> Element<'_, Message> {
     .into()
 }
 
-fn view_session_detail(session: &Session) -> Element<'_, Message> {
+fn view_session_detail(session: &Session, summarizing: bool) -> Element<'_, Message> {
     // ── Action buttons ────────────────────────────────────────────────────
-    let actions = row![
+    let mut actions = row![
         button("Export to Markdown").on_press(Message::ExportSelectedSession),
         button("Delete Session").on_press(Message::DeleteSelectedSession),
     ]
     .spacing(vox_theme::SPACING);
+
+    // Show "Generate Summary" button only when no summary exists yet.
+    if session.summary.is_none() && !session.transcript.is_empty() {
+        let summarize_btn = if summarizing {
+            button("Generating…")
+        } else {
+            button("Generate Summary").on_press(Message::GenerateSummary)
+        };
+        actions = actions.push(summarize_btn);
+    }
+
+    // ── Summary section (if present) ─────────────────────────────────────
+    let summary_section: Column<'_, Message> = if let Some(ref summary) = session.summary {
+        let mut col = Column::new().spacing(vox_theme::SPACING);
+        col = col.push(text("AI Summary").size(14u32));
+        col = col.push(text(&summary.overview).size(13u32));
+
+        if !summary.key_points.is_empty() {
+            col = col.push(text("Key Points:").size(13u32));
+            for point in &summary.key_points {
+                col = col.push(
+                    text(format!("  \u{2022} {point}")).size(12u32),
+                );
+            }
+        }
+
+        if !summary.action_items.is_empty() {
+            col = col.push(text("Action Items:").size(13u32));
+            for item in &summary.action_items {
+                let label = match &item.owner {
+                    Some(owner) => format!("  \u{2022} {} ({})", item.description, owner),
+                    None => format!("  \u{2022} {}", item.description),
+                };
+                col = col.push(text(label).size(12u32));
+            }
+        }
+
+        if !summary.decisions.is_empty() {
+            col = col.push(text("Decisions:").size(13u32));
+            for decision in &summary.decisions {
+                col = col.push(
+                    text(format!("  \u{2022} {decision}")).size(12u32),
+                );
+            }
+        }
+
+        col = col.push(
+            text(format!(
+                "Generated {} via {} ({})",
+                summary.generated_at.format("%Y-%m-%d %H:%M UTC"),
+                summary.backend,
+                summary.model,
+            ))
+            .size(11u32),
+        );
+
+        col
+    } else {
+        Column::new()
+    };
 
     // ── Speaker name editor ───────────────────────────────────────────────
     let speakers_editor: Column<'_, Message> = session.speakers.iter().enumerate().fold(
@@ -992,25 +1139,31 @@ fn view_session_detail(session: &Session) -> Element<'_, Message> {
                 )
             });
 
-    scrollable(
-        column![
-            text(format!(
-                "Session — {}",
-                session.created_at.format("%Y-%m-%d %H:%M UTC")
-            ))
-            .size(16u32),
-            actions,
-            rule::horizontal(1),
-            text("Speaker Names:").size(13u32),
-            speakers_editor,
-            rule::horizontal(1),
-            text("Transcript:").size(13u32),
-            transcript_items,
-        ]
-        .spacing(vox_theme::SPACING)
-        .padding(vox_theme::PADDING),
-    )
-    .into()
+    let mut content = column![
+        text(format!(
+            "Session — {}",
+            session.created_at.format("%Y-%m-%d %H:%M UTC")
+        ))
+        .size(16u32),
+        actions,
+    ]
+    .spacing(vox_theme::SPACING)
+    .padding(vox_theme::PADDING);
+
+    // Show summary section between actions and speaker names if present.
+    if session.summary.is_some() {
+        content = content.push(rule::horizontal(1));
+        content = content.push(summary_section);
+    }
+
+    content = content.push(rule::horizontal(1));
+    content = content.push(text("Speaker Names:").size(13u32));
+    content = content.push(speakers_editor);
+    content = content.push(rule::horizontal(1));
+    content = content.push(text("Transcript:").size(13u32));
+    content = content.push(transcript_items);
+
+    scrollable(content).into()
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

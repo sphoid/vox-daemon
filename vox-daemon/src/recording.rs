@@ -179,12 +179,12 @@ fn build_session(config: &AppConfig, mic_samples: usize, app_samples: usize) -> 
 
     session.speakers = vec![
         SpeakerMapping {
-            id: "speaker_0".to_owned(),
+            id: "You".to_owned(),
             friendly_name: "You".to_owned(),
             source: SpeakerSource::Microphone,
         },
         SpeakerMapping {
-            id: "speaker_1".to_owned(),
+            id: "Remote".to_owned(),
             friendly_name: "Remote".to_owned(),
             source: SpeakerSource::Remote,
         },
@@ -217,12 +217,15 @@ fn select_capture_targets(
     let all_streams = vox_capture::PipeWireSource::enumerate_streams(&StreamFilter::default())
         .map_err(|e| anyhow::anyhow!("failed to enumerate PipeWire sources: {e}"))?;
 
-    tracing::debug!("discovered {} PipeWire nodes", all_streams.len());
+    tracing::info!("discovered {} PipeWire nodes", all_streams.len());
     for s in &all_streams {
-        tracing::debug!(
+        tracing::info!(
             node_id = s.node_id,
             name = %s.name,
             class = ?s.media_class,
+            app = ?s.application_name,
+            is_source = s.is_source(),
+            is_monitor = s.is_monitor_or_virtual(),
             "  node"
         );
     }
@@ -266,7 +269,22 @@ fn resolve_source(
     if setting == "auto" || setting.is_empty() {
         // Auto-detect: pick the first node matching the role.
         if is_mic {
-            streams.iter().find(|s| s.is_source()).map(|s| s.node_id)
+            // Prefer a real hardware source (excludes monitors/virtual).
+            // Fall back to any source if no hardware source is found.
+            let node = streams.iter().find(|s| s.is_source()).or_else(|| {
+                let fallback = streams.iter().find(|s| s.is_any_source());
+                if let Some(ref fb) = fallback {
+                    tracing::warn!(
+                        node_id = fb.node_id,
+                        name = %fb.name,
+                        "no hardware mic found; falling back to virtual/monitor source — \
+                         speaker attribution may be unreliable. Set `audio.mic_source` \
+                         in config to the correct node ID or name."
+                    );
+                }
+                fallback
+            });
+            node.map(|s| s.node_id)
         } else {
             // For app audio, prefer Stream/Input/Audio (active application
             // playback), fall back to any Audio/Sink.
@@ -300,12 +318,20 @@ fn resolve_source(
 }
 
 /// Transcribe mic and app audio chunks into the session transcript.
+///
+/// Speaker attribution is purely stream-based: mic audio → "You", app
+/// audio → "Remote". Echo deduplication removes "Remote" segments that
+/// duplicate "You" segments (the user's voice leaking into the app stream).
 fn transcribe_audio(
     session: &mut Session,
     mic_chunks: Vec<AudioChunk>,
     app_chunks: Vec<AudioChunk>,
 ) -> Result<()> {
     tracing::info!("starting transcription...");
+
+    // Log audio diagnostics to help troubleshoot source selection issues.
+    log_audio_diagnostics("mic", &mic_chunks);
+    log_audio_diagnostics("app", &app_chunks);
 
     #[cfg(feature = "whisper")]
     let transcriber = {
@@ -329,7 +355,13 @@ fn transcribe_audio(
         let result = transcriber
             .transcribe(&request)
             .map_err(|e| anyhow::anyhow!("mic transcription failed: {e}"))?;
+        tracing::info!("mic produced {} segments", result.segments.len());
         session.transcript.extend(result.segments);
+    } else {
+        tracing::warn!(
+            "mic stream produced no audio — check that the correct microphone \
+             node is selected (see `vox-daemon list-sources`)"
+        );
     }
 
     if !app_audio.is_empty() {
@@ -337,6 +369,7 @@ fn transcribe_audio(
         let result = transcriber
             .transcribe(&request)
             .map_err(|e| anyhow::anyhow!("app transcription failed: {e}"))?;
+        tracing::info!("app produced {} segments", result.segments.len());
         session.transcript.extend(result.segments);
     }
 
@@ -363,6 +396,41 @@ fn transcribe_audio(
         session.transcript.len()
     );
     Ok(())
+}
+
+/// Log diagnostic information about captured audio chunks.
+///
+/// Helps the user verify that the correct PipeWire nodes were selected and
+/// that audio is being captured at a reasonable level.
+#[allow(clippy::cast_precision_loss)]
+fn log_audio_diagnostics(label: &str, chunks: &[AudioChunk]) {
+    if chunks.is_empty() {
+        tracing::warn!("{label}: no audio chunks captured");
+        return;
+    }
+
+    let total_samples: usize = chunks.iter().map(|c| c.samples.len()).sum();
+    let duration_secs = total_samples as f64 / 16_000.0;
+
+    // Compute overall RMS energy.
+    let sum_sq: f64 = chunks
+        .iter()
+        .flat_map(|c| c.samples.iter())
+        .map(|&s| f64::from(s) * f64::from(s))
+        .sum();
+    let rms = (sum_sq / total_samples as f64).sqrt();
+
+    tracing::info!(
+        "{label}: {:.1}s of audio, {total_samples} samples, RMS energy = {rms:.4}",
+        duration_secs
+    );
+
+    if rms < 0.001 {
+        tracing::warn!(
+            "{label}: audio energy is extremely low — this stream may be \
+             silent or connected to the wrong PipeWire node"
+        );
+    }
 }
 
 /// Remove "Remote" segments that are echoes of "You" segments.
@@ -449,3 +517,4 @@ fn word_similarity(a: &str, b: &str) -> f64 {
     let similarity = intersection as f64 / union as f64;
     similarity
 }
+

@@ -154,6 +154,27 @@ DOMAINS=(
 
     #── codeberg.org (whisper-rs canonical repo) ──
     "codeberg.org"
+
+    #── Claude Code plugin system ──
+    #── Plugins install via `git clone` from GitHub (already allowed via
+    #── GitHub meta API above), but the git protocol may resolve different
+    #── IPs than the web/API endpoints. Add these explicitly.
+    "github.com"                        # git clone over HTTPS
+    "api.github.com"                    # Marketplace metadata lookups
+    "codeload.github.com"              # Git archive downloads (used by some plugin installs)
+
+    #── npm CDN (some plugins use npx or npm install for tooling) ──
+    "registry.yarnpkg.com"              # Fallback registry
+    "npmjs.com"                         # npm website (package metadata)
+    "www.npmjs.com"                     # npm website
+
+    #── Rust component downloads (rust-analyzer binary) ──
+    #── `rustup component add rust-analyzer` downloads from these.
+    #── They're all CloudFront-backed (handled by the AWS IP range fetch
+    #── above), but adding them to the DNS resolution list ensures we
+    #── catch any non-CloudFront IPs too.
+    "toolchains.rust-lang.org"          # Rustup toolchain manifests
+    "dev-static.rust-lang.org"          # Alternative static host
 )
 
 echo "Resolving allowed domains..."

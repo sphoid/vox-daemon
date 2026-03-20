@@ -97,15 +97,52 @@ pub struct StreamInfo {
 }
 
 impl StreamInfo {
-    /// Returns `true` if this node looks like a microphone source.
+    /// Returns `true` if this node looks like a hardware microphone source.
     ///
-    /// Heuristic: media class contains `"Source"` or the name contains `"input"`.
+    /// Heuristic: media class contains `"Source"` (but not `"Virtual"`) and
+    /// the node name does not indicate a monitor or loopback device. This
+    /// avoids selecting PipeWire monitor/loopback nodes that capture system
+    /// audio rather than the user's voice.
     #[must_use]
     pub fn is_source(&self) -> bool {
+        let is_monitor_or_virtual = self.is_monitor_or_virtual();
+
+        let class_matches = self
+            .media_class
+            .as_deref()
+            .is_some_and(|c| c.contains("Source"));
+
+        let name_matches = self.name.to_ascii_lowercase().contains("input");
+
+        (class_matches || name_matches) && !is_monitor_or_virtual
+    }
+
+    /// Returns `true` if this node looks like a hardware microphone,
+    /// ignoring the monitor/virtual exclusion. Useful as a last-resort
+    /// fallback when no non-virtual source is available.
+    #[must_use]
+    pub fn is_any_source(&self) -> bool {
         self.media_class
             .as_deref()
             .is_some_and(|c| c.contains("Source"))
             || self.name.to_ascii_lowercase().contains("input")
+    }
+
+    /// Returns `true` if this node appears to be a monitor, loopback, or
+    /// virtual audio source rather than a physical microphone.
+    #[must_use]
+    pub fn is_monitor_or_virtual(&self) -> bool {
+        let name_lower = self.name.to_ascii_lowercase();
+        let is_monitor_name = name_lower.contains("monitor")
+            || name_lower.contains("loopback")
+            || name_lower.contains(".peak");
+
+        let is_virtual_class = self
+            .media_class
+            .as_deref()
+            .is_some_and(|c| c.contains("Virtual"));
+
+        is_monitor_name || is_virtual_class
     }
 
     /// Returns `true` if this node looks like an application audio sink.
@@ -260,5 +297,48 @@ mod tests {
             suggested_role: None,
         };
         assert!(info.is_app_sink());
+    }
+
+    #[test]
+    fn stream_info_monitor_excluded_from_source() {
+        let monitor = StreamInfo {
+            node_id: 5,
+            name: "alsa_output.pci-0000.monitor".to_owned(),
+            description: None,
+            application_name: None,
+            media_class: Some("Audio/Source".to_owned()),
+            suggested_role: None,
+        };
+        assert!(!monitor.is_source(), "monitor node should not match is_source");
+        assert!(monitor.is_any_source(), "monitor should match is_any_source as fallback");
+        assert!(monitor.is_monitor_or_virtual());
+    }
+
+    #[test]
+    fn stream_info_virtual_source_excluded() {
+        let virtual_src = StreamInfo {
+            node_id: 6,
+            name: "virtual-mic".to_owned(),
+            description: None,
+            application_name: None,
+            media_class: Some("Audio/Source/Virtual".to_owned()),
+            suggested_role: None,
+        };
+        assert!(!virtual_src.is_source(), "virtual source should not match is_source");
+        assert!(virtual_src.is_monitor_or_virtual());
+    }
+
+    #[test]
+    fn stream_info_real_mic_is_source() {
+        let mic = StreamInfo {
+            node_id: 7,
+            name: "alsa_input.usb-Blue_Yeti".to_owned(),
+            description: None,
+            application_name: None,
+            media_class: Some("Audio/Source".to_owned()),
+            suggested_role: None,
+        };
+        assert!(mic.is_source(), "real hardware mic should match is_source");
+        assert!(!mic.is_monitor_or_virtual());
     }
 }

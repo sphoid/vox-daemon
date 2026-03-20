@@ -18,8 +18,11 @@ use crate::{
     error::SummarizeError, parse::parse_response, prompt::build_prompt, traits::Summarizer,
 };
 
-/// Default timeout for LLM HTTP requests (90 seconds).
-const REQUEST_TIMEOUT_SECS: u64 = 90;
+/// Default timeout for LLM HTTP requests (5 minutes).
+///
+/// Remote LLM endpoints can be slow, especially under load or when the
+/// provider needs to cold-start a model.
+const REQUEST_TIMEOUT_SECS: u64 = 300;
 
 /// Approximate maximum tokens to request in the completion.
 const MAX_COMPLETION_TOKENS: u32 = 1024;

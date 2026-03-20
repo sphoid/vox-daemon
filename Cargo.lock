@@ -5093,6 +5093,7 @@ dependencies = [
  "vox-capture",
  "vox-core",
  "vox-storage",
+ "vox-summarize",
 ]
 
 [[package]]

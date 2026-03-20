@@ -3,7 +3,7 @@
 
 use vox_core::config::SummarizationConfig;
 
-use crate::{client::OpenAiClient, error::SummarizeError, traits::Summarizer};
+use crate::{client::OpenAiClient, error::SummarizeError, ollama::OllamaClient, traits::Summarizer};
 
 /// Create a [`Summarizer`] from the application configuration.
 ///
@@ -11,7 +11,7 @@ use crate::{client::OpenAiClient, error::SummarizeError, traits::Summarizer};
 ///
 /// | `config.backend` | Implementation |
 /// |---|---|
-/// | `"ollama"` | [`OpenAiClient`] pointed at `config.ollama_url` |
+/// | `"ollama"` | [`OllamaClient`] using native `/api/chat` endpoint |
 /// | `"openai_compatible"` | [`OpenAiClient`] pointed at `config.api_url` |
 /// | `"builtin"` | Returns [`SummarizeError::BackendNotImplemented`] |
 /// | anything else | Returns [`SummarizeError::UnknownBackend`] |
@@ -39,11 +39,8 @@ pub fn create_summarizer(
             } else {
                 config.ollama_model.clone()
             };
-            tracing::info!(url, model, "creating Ollama summarizer");
-            let client = OpenAiClient::new(
-                url, None, // Ollama does not require an API key.
-                model, "ollama",
-            )?;
+            tracing::info!(url, model, "creating Ollama summarizer (native API)");
+            let client = OllamaClient::new(url, model)?;
             Ok(Box::new(client))
         }
 
