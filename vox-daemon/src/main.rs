@@ -11,6 +11,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
+mod audio_merge;
 mod daemon;
 mod recording;
 
@@ -68,7 +69,11 @@ enum Command {
 
     /// Launch the settings / transcript browser GUI window.
     #[cfg(feature = "ui")]
-    Gui,
+    Gui {
+        /// Which page to open: "settings" or "browser".
+        #[arg(long, default_value = "settings")]
+        page: String,
+    },
 }
 
 fn init_logging(verbosity: u8) {
@@ -93,8 +98,14 @@ fn main() -> Result<()> {
     // The GUI command must run WITHOUT a tokio runtime because iced creates
     // its own internally. Handle it before building the async runtime.
     #[cfg(feature = "ui")]
-    if matches!(cli.command, Command::Gui) {
-        vox_gui::app::run().map_err(|e| anyhow::anyhow!("GUI error: {e}"))?;
+    if let Command::Gui { ref page } = cli.command {
+        let (initial_page, select_latest) = match page.as_str() {
+            "browser" => (vox_gui::app::Page::Browser, false),
+            "latest" => (vox_gui::app::Page::Browser, true),
+            _ => (vox_gui::app::Page::Settings, false),
+        };
+        vox_gui::app::run_with_page(initial_page, select_latest)
+            .map_err(|e| anyhow::anyhow!("GUI error: {e}"))?;
         return Ok(());
     }
 
@@ -114,7 +125,7 @@ async fn async_main(cli: Cli) -> Result<()> {
 
     match cli.command {
         #[cfg(feature = "ui")]
-        Command::Gui => unreachable!("handled before runtime"),
+        Command::Gui { .. } => unreachable!("handled before runtime"),
         Command::Start => {
             tracing::info!("starting vox-daemon");
             daemon::run(config).await?;

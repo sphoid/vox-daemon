@@ -192,11 +192,29 @@ async fn handle_tray_event(
         TrayEvent::PauseRecording => {
             tracing::info!("pause recording requested via tray (not yet implemented)");
         }
-        TrayEvent::OpenSettings | TrayEvent::OpenLastTranscript | TrayEvent::BrowseTranscripts => {
+        TrayEvent::OpenSettings => {
             #[cfg(feature = "ui")]
             {
-                tracing::info!("launching GUI window");
-                launch_gui();
+                tracing::info!("launching GUI window (settings)");
+                launch_gui("settings");
+            }
+            #[cfg(not(feature = "ui"))]
+            tracing::info!("GUI not available (build with --features ui)");
+        }
+        TrayEvent::OpenLastTranscript => {
+            #[cfg(feature = "ui")]
+            {
+                tracing::info!("launching GUI window (latest transcript)");
+                launch_gui("latest");
+            }
+            #[cfg(not(feature = "ui"))]
+            tracing::info!("GUI not available (build with --features ui)");
+        }
+        TrayEvent::BrowseTranscripts => {
+            #[cfg(feature = "ui")]
+            {
+                tracing::info!("launching GUI window (browser)");
+                launch_gui("browser");
             }
             #[cfg(not(feature = "ui"))]
             tracing::info!("GUI not available (build with --features ui)");
@@ -210,8 +228,10 @@ async fn handle_tray_event(
 }
 
 /// Spawn the GUI as a child process so iced/winit can use the main thread.
+///
+/// `page` should be `"settings"` or `"browser"`.
 #[cfg(feature = "ui")]
-fn launch_gui() {
+fn launch_gui(page: &str) {
     let exe = match std::env::current_exe() {
         Ok(p) => p,
         Err(e) => {
@@ -219,7 +239,10 @@ fn launch_gui() {
             return;
         }
     };
-    match std::process::Command::new(exe).arg("gui").spawn() {
+    match std::process::Command::new(exe)
+        .args(["gui", "--page", page])
+        .spawn()
+    {
         Ok(child) => tracing::info!(pid = child.id(), "GUI process spawned"),
         Err(e) => tracing::error!("failed to spawn GUI process: {e}"),
     }

@@ -18,6 +18,7 @@ vox-storage = { workspace = true }
 vox-tray = { path = "../crates/vox-tray" }
 vox-notify = { path = "../crates/vox-notify" }
 vox-summarize = { path = "../crates/vox-summarize" }
+vox-diarize = { workspace = true, optional = true }
 vox-gui = { path = "../crates/vox-gui", optional = true, features = ["ui"] }
 
 tokio = { workspace = true }
@@ -37,3 +38,4 @@ pw = ["vox-capture/pw", "vox-gui?/pw"]
 whisper = ["vox-transcribe/whisper"]
 cuda = ["vox-transcribe/cuda"]
 hipblas = ["vox-transcribe/hipblas"]
+diarize = ["dep:vox-diarize", "vox-diarize/onnx"]

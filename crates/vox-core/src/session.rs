@@ -88,6 +88,13 @@ pub struct ConfigSnapshot {
     pub language: String,
     /// GPU backend used.
     pub gpu_backend: String,
+    /// Diarization mode: `"none"` or `"embedding"`.
+    #[serde(default = "default_diarization_mode")]
+    pub diarization_mode: String,
+}
+
+fn default_diarization_mode() -> String {
+    "none".to_owned()
 }
 
 /// A single segment of the transcript with timing and speaker info.
@@ -122,6 +129,8 @@ pub enum SpeakerSource {
     Microphone,
     /// A remote participant's audio.
     Remote,
+    /// Unknown source (undiarized / merged audio).
+    Unknown,
 }
 
 /// An AI-generated summary of a session.
@@ -167,6 +176,7 @@ mod tests {
             model: "base".to_owned(),
             language: "en".to_owned(),
             gpu_backend: "auto".to_owned(),
+            diarization_mode: "none".to_owned(),
         };
         let session = Session::new(sources, config);
         assert_eq!(session.duration_seconds, 0);
@@ -193,6 +203,7 @@ mod tests {
                 model: "small".to_owned(),
                 language: "auto".to_owned(),
                 gpu_backend: "cuda".to_owned(),
+                diarization_mode: "none".to_owned(),
             },
         );
 

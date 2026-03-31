@@ -6,6 +6,7 @@ members = [
     "crates/vox-transcribe",
     "crates/vox-summarize",
     "crates/vox-storage",
+    "crates/vox-diarize",
     "crates/vox-gui",
     "crates/vox-tray",
     "crates/vox-notify",
@@ -42,6 +43,7 @@ dirs = "6"
 crossbeam-channel = "0.5"
 clap = { version = "4", features = ["derive"] }
 reqwest = { version = "0.12", features = ["json"] }
+rfd = "0.15"
 
 # Workspace crate cross-references
 vox-core = { path = "crates/vox-core" }
@@ -51,4 +53,5 @@ vox-summarize = { path = "crates/vox-summarize" }
 vox-storage = { path = "crates/vox-storage" }
 vox-gui = { path = "crates/vox-gui" }
 vox-tray = { path = "crates/vox-tray" }
+vox-diarize = { path = "crates/vox-diarize" }
 vox-notify = { path = "crates/vox-notify" }

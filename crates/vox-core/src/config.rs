@@ -107,6 +107,26 @@ pub struct TranscriptionConfig {
     /// Custom model path, or empty string to use the default cache directory.
     #[serde(default)]
     pub model_path: String,
+
+    /// Diarization mode: `"none"` (merge streams, single speaker label) or
+    /// `"embedding"` (ONNX speaker embeddings + clustering).
+    #[serde(default = "default_diarization_mode")]
+    pub diarization_mode: String,
+
+    /// Custom path to an ONNX speaker embedding model.  Empty string uses
+    /// the default auto-downloaded ECAPA-TDNN model.
+    #[serde(default)]
+    pub diarize_model_path: String,
+
+    /// Cosine distance threshold for agglomerative clustering.
+    /// Lower values produce more clusters (stricter speaker separation).
+    #[serde(default = "default_diarize_threshold")]
+    pub diarize_threshold: f64,
+
+    /// Duration (seconds) of mic-only audio at session start to use as
+    /// enrollment for identifying the local user's voice.
+    #[serde(default = "default_enrollment_seconds")]
+    pub enrollment_seconds: f64,
 }
 
 impl Default for TranscriptionConfig {
@@ -116,6 +136,10 @@ impl Default for TranscriptionConfig {
             language: "en".to_owned(),
             gpu_backend: "auto".to_owned(),
             model_path: String::new(),
+            diarization_mode: "none".to_owned(),
+            diarize_model_path: String::new(),
+            diarize_threshold: 0.5,
+            enrollment_seconds: 5.0,
         }
     }
 }
@@ -259,6 +283,18 @@ fn default_ollama_model() -> String {
 
 fn default_export_format() -> String {
     "markdown".to_owned()
+}
+
+fn default_diarization_mode() -> String {
+    "none".to_owned()
+}
+
+fn default_diarize_threshold() -> f64 {
+    0.5
+}
+
+fn default_enrollment_seconds() -> f64 {
+    5.0
 }
 
 #[cfg(test)]

@@ -202,13 +202,15 @@ pub enum ExportFormat {
     Markdown,
     /// Raw JSON — preserves all metadata.
     Json,
+    /// Plain text (`.txt`) — no formatting.
+    Text,
 }
 
 impl ExportFormat {
     /// Returns all variants.
     #[must_use]
     pub fn all() -> &'static [Self] {
-        &[Self::Markdown, Self::Json]
+        &[Self::Markdown, Self::Json, Self::Text]
     }
 
     /// Returns the string identifier used in the config file.
@@ -217,6 +219,17 @@ impl ExportFormat {
         match self {
             Self::Markdown => "markdown",
             Self::Json => "json",
+            Self::Text => "text",
+        }
+    }
+
+    /// Returns the file extension (without leading dot).
+    #[must_use]
+    pub fn extension(self) -> &'static str {
+        match self {
+            Self::Markdown => "md",
+            Self::Json => "json",
+            Self::Text => "txt",
         }
     }
 
@@ -229,6 +242,7 @@ impl ExportFormat {
         match s {
             "markdown" => Some(Self::Markdown),
             "json" => Some(Self::Json),
+            "text" => Some(Self::Text),
             _ => None,
         }
     }
@@ -239,6 +253,37 @@ impl std::fmt::Display for ExportFormat {
         f.write_str(match self {
             Self::Markdown => "Markdown (.md)",
             Self::Json => "JSON (.json)",
+            Self::Text => "Text (.txt)",
+        })
+    }
+}
+
+/// What content to include in an export.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ExportContent {
+    /// Only the transcript.
+    Transcript,
+    /// Only the AI summary.
+    Summary,
+    /// Both transcript and AI summary (default).
+    #[default]
+    TranscriptAndSummary,
+}
+
+impl ExportContent {
+    /// Returns all variants.
+    #[must_use]
+    pub fn all() -> &'static [Self] {
+        &[Self::TranscriptAndSummary, Self::Transcript, Self::Summary]
+    }
+}
+
+impl std::fmt::Display for ExportContent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Transcript => "Transcript",
+            Self::Summary => "AI Summary",
+            Self::TranscriptAndSummary => "Transcript + AI Summary",
         })
     }
 }
@@ -454,6 +499,7 @@ impl SettingsModel {
                 language: self.transcription.language.clone(),
                 gpu_backend: self.transcription.gpu_backend.as_str().to_owned(),
                 model_path: self.transcription.model_path.clone(),
+                ..TranscriptionConfig::default()
             },
             summarization: SummarizationConfig {
                 auto_summarize: self.summarization.auto_summarize,

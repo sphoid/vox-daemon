@@ -141,6 +141,7 @@ Guidelines:
 - "action_items": Every concrete task, commitment, or follow-up mentioned. Set "owner" to the speaker's name when clearly assigned, otherwise null.
 - "decisions": Every conclusion, agreement, or resolved question from the call.
 - If a section has no items, use an empty array [].
+- If all segments are labeled "Speaker" (undiarized transcript), use conversational context, question-response patterns, and topic shifts to infer different speakers where possible. Label inferred speakers as "Speaker A", "Speaker B", etc.
 - Do not invent information that is not in the transcript."#.to_owned()
 }
 

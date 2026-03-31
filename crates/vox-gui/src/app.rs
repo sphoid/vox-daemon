@@ -18,11 +18,13 @@
 //! - [`Page::Settings`] — settings form backed by [`SettingsModel`]
 //! - [`Page::Browser`] — transcript list + detail viewer with search
 
+use std::sync::OnceLock;
+
 use iced::widget::rule;
 use iced::widget::{
     Column, button, column, container, pick_list, row, scrollable, text, text_input, toggler,
 };
-use iced::{Element, Fill, Font, Length, Size, Task, Theme};
+use iced::{Color, Element, Fill, Font, Length, Size, Task, Theme};
 use tracing::{error, info, warn};
 use uuid::Uuid;
 use vox_core::config::AppConfig;
@@ -32,7 +34,7 @@ use vox_storage::store::{JsonFileStore, SessionStore};
 use crate::browser::{SessionListEntry, build_session_list};
 use crate::search::search_transcripts;
 use crate::settings::{
-    ExportFormat, GpuBackend, SettingsModel, SummarizationBackend, WhisperModel,
+    ExportContent, ExportFormat, GpuBackend, SettingsModel, SummarizationBackend, WhisperModel,
 };
 use crate::theme as vox_theme;
 
@@ -90,6 +92,12 @@ pub enum Page {
     /// Transcript browser (list, search, detail view).
     Browser,
 }
+
+/// Holds the initial page set via [`run_with_page`].
+static INITIAL_PAGE: OnceLock<Page> = OnceLock::new();
+
+/// When `true`, the browser auto-selects the most recent session on startup.
+static SELECT_LATEST: OnceLock<bool> = OnceLock::new();
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Message enum
@@ -167,9 +175,17 @@ pub enum Message {
     SessionSelected(Uuid),
     /// A full session was loaded from disk.
     SessionLoaded(Box<Session>),
-    /// The user requested export of the selected session to Markdown.
-    ExportSelectedSession,
-    /// Export result (the absolute path of the written `.md` file, or an error message).
+    /// Open the export modal dialog.
+    OpenExportModal,
+    /// Close the export modal without exporting.
+    CloseExportModal,
+    /// The "what to export" pick-list in the modal changed.
+    ExportContentChanged(ExportContent),
+    /// The "format" pick-list in the modal changed.
+    ExportModalFormatChanged(ExportFormat),
+    /// The user confirmed the export (triggers file dialog + write).
+    ConfirmExport,
+    /// Export completed (carries the file path or an error message).
     ExportResult(Result<String, String>),
     /// The user requested deletion of the selected session.
     DeleteSelectedSession,
@@ -199,6 +215,24 @@ pub enum Message {
 // ──────────────────────────────────────────────────────────────────────────────
 // Application state
 // ──────────────────────────────────────────────────────────────────────────────
+
+/// State for the export modal overlay.
+#[derive(Debug, Clone)]
+pub struct ExportModalState {
+    /// What content to include in the export.
+    pub content: ExportContent,
+    /// Export file format.
+    pub format: ExportFormat,
+}
+
+impl Default for ExportModalState {
+    fn default() -> Self {
+        Self {
+            content: ExportContent::TranscriptAndSummary,
+            format: ExportFormat::Markdown,
+        }
+    }
+}
 
 /// All mutable state for the Vox Daemon GUI application.
 pub struct VoxAppState {
@@ -242,6 +276,9 @@ pub struct VoxAppState {
 
     /// Whether a summary generation is currently in progress.
     pub summarizing: bool,
+
+    /// When `Some`, the export modal is open.
+    pub export_modal: Option<ExportModalState>,
 }
 
 impl VoxAppState {
@@ -282,8 +319,19 @@ impl VoxAppState {
             }
         }
 
+        // When launched with --page=latest, auto-select the most recent session.
+        let select_latest = SELECT_LATEST.get().copied().unwrap_or(false);
+        let (selected_session_id, selected_session) = if select_latest {
+            all_sessions
+                .first()
+                .map(|s| (Some(s.id), Some(s.clone())))
+                .unwrap_or((None, None))
+        } else {
+            (None, None)
+        };
+
         Self {
-            page: Page::Browser,
+            page: INITIAL_PAGE.get().copied().unwrap_or(Page::Settings),
             settings,
             settings_save_status: None,
             available_mic_sources,
@@ -291,10 +339,11 @@ impl VoxAppState {
             session_list,
             all_sessions,
             search_query: String::new(),
-            selected_session_id: None,
-            selected_session: None,
+            selected_session_id,
+            selected_session,
             browser_status: None,
             summarizing: false,
+            export_modal: None,
         }
     }
 
@@ -482,29 +531,81 @@ pub fn update(state: &mut VoxAppState, message: Message) -> Task<Message> {
             Task::none()
         }
 
-        // ── Browser: export ───────────────────────────────────────────────
-        Message::ExportSelectedSession => {
-            let Some(id) = state.selected_session_id else {
+        // ── Browser: export modal ────────────────────────────────────────
+        Message::OpenExportModal => {
+            state.export_modal = Some(ExportModalState::default());
+            Task::none()
+        }
+        Message::CloseExportModal => {
+            state.export_modal = None;
+            Task::none()
+        }
+        Message::ExportContentChanged(content) => {
+            if let Some(ref mut modal) = state.export_modal {
+                modal.content = content;
+            }
+            Task::none()
+        }
+        Message::ExportModalFormatChanged(format) => {
+            if let Some(ref mut modal) = state.export_modal {
+                modal.format = format;
+            }
+            Task::none()
+        }
+        Message::ConfirmExport => {
+            let Some(ref modal) = state.export_modal else {
                 return Task::none();
             };
-            let data_dir = state.settings.storage.data_dir.clone();
+            let Some(ref session) = state.selected_session else {
+                return Task::none();
+            };
+
+            let format = modal.format;
+            let include_transcript = matches!(
+                modal.content,
+                ExportContent::Transcript | ExportContent::TranscriptAndSummary
+            );
+            let include_summary = matches!(
+                modal.content,
+                ExportContent::Summary | ExportContent::TranscriptAndSummary
+            );
+
+            let session = session.clone();
+            let date = session.created_at.format("%Y-%m-%d").to_string();
+            let default_filename = format!("meeting-{date}.{}", format.extension());
+            let format_str = format.as_str().to_owned();
+            let format_label = format.to_string();
+            let extension = format.extension().to_owned();
+
+            state.export_modal = None;
+
             Task::perform(
                 async move {
-                    let store = JsonFileStore::new(&data_dir).map_err(|e| e.to_string())?;
-                    let md = store.export_markdown(id).map_err(|e| e.to_string())?;
+                    let options = vox_storage::RenderOptions {
+                        include_transcript,
+                        include_summary,
+                    };
+                    let content =
+                        vox_storage::render_export(&session, &format_str, &options)?;
 
-                    // Write the markdown alongside the session JSON in the data
-                    // directory (one level above the sessions/ subdir).
-                    let out_path = vox_core::paths::data_dir_or(&data_dir)
-                        .join(format!("{id}.md"));
-                    std::fs::write(&out_path, md.as_bytes())
+                    let dialog = rfd::AsyncFileDialog::new()
+                        .set_title("Export Session")
+                        .set_file_name(&default_filename)
+                        .add_filter(&format_label, &[&extension]);
+
+                    let handle = dialog.save_file().await;
+                    let Some(handle) = handle else {
+                        return Err("Export cancelled.".to_owned());
+                    };
+
+                    let path = handle.path().to_path_buf();
+                    std::fs::write(&path, content.as_bytes())
                         .map_err(|e| e.to_string())?;
 
-                    let path_str = out_path
+                    Ok(path
                         .to_str()
                         .unwrap_or("<non-utf8 path>")
-                        .to_owned();
-                    Ok(path_str)
+                        .to_owned())
                 },
                 Message::ExportResult,
             )
@@ -516,8 +617,12 @@ pub fn update(state: &mut VoxAppState, message: Message) -> Task<Message> {
                     state.browser_status = Some(format!("Exported to {path}"));
                 }
                 Err(e) => {
-                    error!("export failed: {e}");
-                    state.browser_status = Some(format!("Export failed: {e}"));
+                    if e == "Export cancelled." {
+                        info!("export cancelled by user");
+                    } else {
+                        error!("export failed: {e}");
+                    }
+                    state.browser_status = Some(e);
                 }
             }
             Task::none()
@@ -681,6 +786,24 @@ pub fn update(state: &mut VoxAppState, message: Message) -> Task<Message> {
 
 /// Build the widget tree for the current state.
 pub fn view(state: &VoxAppState) -> Element<'_, Message> {
+    // When the export form is open, it takes over the entire window.
+    if let Some(ref modal) = state.export_modal {
+        let has_transcript = state
+            .selected_session
+            .as_ref()
+            .is_some_and(|s| !s.transcript.is_empty());
+        let has_summary = state
+            .selected_session
+            .as_ref()
+            .is_some_and(|s| s.summary.is_some());
+
+        return container(view_export_form(modal, has_transcript, has_summary))
+            .width(Fill)
+            .height(Fill)
+            .padding(vox_theme::PADDING)
+            .into();
+    }
+
     let nav = row![
         button("Browser")
             .on_press(Message::NavigateTo(Page::Browser))
@@ -711,6 +834,83 @@ pub fn view(state: &VoxAppState) -> Element<'_, Message> {
     )
     .width(Fill)
     .height(Fill)
+    .into()
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Export form (shown inline in the detail panel)
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Build the export form that replaces the session detail when open.
+fn view_export_form<'a>(
+    modal: &ExportModalState,
+    has_transcript: bool,
+    has_summary: bool,
+) -> Element<'a, Message> {
+    // Determine whether the Export button should be enabled.
+    let content_available = match modal.content {
+        ExportContent::Transcript => has_transcript,
+        ExportContent::Summary => has_summary,
+        ExportContent::TranscriptAndSummary => has_transcript || has_summary,
+    };
+
+    let content_hint: Element<'_, Message> = if !content_available {
+        text("Selected content is not available for this session.")
+            .size(11u32)
+            .color(Color {
+                r: 0.85,
+                g: 0.25,
+                b: 0.25,
+                a: 1.0,
+            })
+            .into()
+    } else {
+        column![].into()
+    };
+
+    let export_btn = if content_available {
+        button("Export").on_press(Message::ConfirmExport)
+    } else {
+        button("Export")
+    };
+
+    column![
+        text("Export Session").size(16u32),
+        rule::horizontal(1),
+        // What to export
+        column![
+            text("What to export").size(12u32),
+            pick_list(
+                ExportContent::all(),
+                Some(modal.content),
+                Message::ExportContentChanged,
+            )
+            .width(300u32),
+        ]
+        .spacing(4),
+        // Format
+        column![
+            text("Format").size(12u32),
+            pick_list(
+                ExportFormat::all(),
+                Some(modal.format),
+                Message::ExportModalFormatChanged,
+            )
+            .width(300u32),
+        ]
+        .spacing(4),
+        content_hint,
+        // Buttons
+        row![
+            button("Cancel")
+                .on_press(Message::CloseExportModal)
+                .style(button::secondary),
+            export_btn.style(button::primary),
+        ]
+        .spacing(vox_theme::SPACING),
+    ]
+    .spacing(vox_theme::SECTION_SPACING)
+    .padding(vox_theme::PADDING)
     .into()
 }
 
@@ -1027,7 +1227,7 @@ fn view_browser(state: &VoxAppState) -> Element<'_, Message> {
 fn view_session_detail(session: &Session, summarizing: bool) -> Element<'_, Message> {
     // ── Action buttons ────────────────────────────────────────────────────
     let mut actions = row![
-        button("Export to Markdown").on_press(Message::ExportSelectedSession),
+        button("Export").on_press(Message::OpenExportModal),
         button("Delete Session").on_press(Message::DeleteSelectedSession),
     ]
     .spacing(vox_theme::SPACING);
@@ -1288,6 +1488,22 @@ pub fn theme(_state: &VoxAppState) -> Theme {
 /// Returns an `iced::Error` if the window cannot be created (e.g. no display
 /// server available).
 pub fn run() -> iced::Result {
+    run_with_page(Page::Settings, false)
+}
+
+/// Launch the GUI window opening to the given [`Page`].
+///
+/// When `select_latest` is `true` and the page is [`Page::Browser`], the
+/// most recent session is automatically selected on startup.
+///
+/// # Errors
+///
+/// Returns an `iced::Error` if the window cannot be created.
+pub fn run_with_page(page: Page, select_latest: bool) -> iced::Result {
+    // Ignore error if already set (first writer wins).
+    let _ = INITIAL_PAGE.set(page);
+    let _ = SELECT_LATEST.set(select_latest);
+
     iced::application(new, update, view)
         .title("Vox Daemon")
         .theme(theme)

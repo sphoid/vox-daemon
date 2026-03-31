@@ -7,6 +7,24 @@ use std::fmt::Write as _;
 
 use vox_core::session::Session;
 
+/// Options controlling which parts of a session to include in an export.
+#[derive(Debug, Clone, Copy)]
+pub struct RenderOptions {
+    /// Include the transcript section.
+    pub include_transcript: bool,
+    /// Include the AI summary section.
+    pub include_summary: bool,
+}
+
+impl Default for RenderOptions {
+    fn default() -> Self {
+        Self {
+            include_transcript: true,
+            include_summary: true,
+        }
+    }
+}
+
 /// Render a [`Session`] as a Markdown document.
 ///
 /// The returned string includes:
@@ -16,11 +34,21 @@ use vox_core::session::Session;
 /// - An optional AI-generated summary section if one is present.
 #[must_use]
 pub fn render(session: &Session) -> String {
+    render_with_options(session, &RenderOptions::default())
+}
+
+/// Render a [`Session`] as a Markdown document with the given options.
+#[must_use]
+pub fn render_with_options(session: &Session, options: &RenderOptions) -> String {
     let mut out = String::with_capacity(4096);
 
     render_header(session, &mut out);
-    render_transcript(session, &mut out);
-    render_summary(session, &mut out);
+    if options.include_transcript {
+        render_transcript(session, &mut out);
+    }
+    if options.include_summary {
+        render_summary(session, &mut out);
+    }
 
     out
 }
@@ -115,7 +143,7 @@ fn render_summary(session: &Session, out: &mut String) {
 /// Hours are omitted when zero, giving `MM:SS` instead.
 #[must_use]
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-fn format_timestamp(seconds: f64) -> String {
+pub(crate) fn format_timestamp(seconds: f64) -> String {
     let total = seconds as u64;
     let h = total / 3600;
     let m = (total % 3600) / 60;
@@ -129,7 +157,7 @@ fn format_timestamp(seconds: f64) -> String {
 
 /// Format a duration in seconds to a human-readable string such as `"1h 02m 30s"`.
 #[must_use]
-fn format_duration(seconds: u64) -> String {
+pub(crate) fn format_duration(seconds: u64) -> String {
     if seconds == 0 {
         return "0s".to_owned();
     }
@@ -154,7 +182,7 @@ fn format_duration(seconds: u64) -> String {
 ///
 /// Looks up `speaker_id` in the session's speaker mappings; if not found,
 /// returns the raw ID as-is.
-fn resolve_speaker<'a>(session: &'a Session, speaker_id: &'a str) -> &'a str {
+pub(crate) fn resolve_speaker<'a>(session: &'a Session, speaker_id: &'a str) -> &'a str {
     session
         .speakers
         .iter()
@@ -166,7 +194,7 @@ fn resolve_speaker<'a>(session: &'a Session, speaker_id: &'a str) -> &'a str {
 ///
 /// Prefers friendly names from speaker mappings; falls back to speaker IDs
 /// found in transcript segments.
-fn collect_participants(session: &Session) -> Vec<String> {
+pub(crate) fn collect_participants(session: &Session) -> Vec<String> {
     if !session.speakers.is_empty() {
         return session
             .speakers
@@ -206,6 +234,7 @@ mod tests {
                 model: "base".to_owned(),
                 language: "en".to_owned(),
                 gpu_backend: "auto".to_owned(),
+                diarization_mode: "none".to_owned(),
             },
         )
     }

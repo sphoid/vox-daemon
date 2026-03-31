@@ -9,7 +9,6 @@ use vox_capture::{AudioChunk, AudioSource, StreamRole};
 use vox_core::config::AppConfig;
 use vox_core::session::{
     AudioRole, AudioSourceInfo, ConfigSnapshot, Session, SpeakerMapping, SpeakerSource,
-    TranscriptSegment,
 };
 use vox_storage::{JsonFileStore, SessionStore};
 use vox_transcribe::{AudioSourceRole, Transcriber, TranscriptionRequest};
@@ -45,7 +44,7 @@ pub async fn record_session(
 
     let mut session = build_session(&config, mic_sample_count, app_sample_count);
 
-    transcribe_audio(&mut session, mic_chunks, app_chunks)?;
+    transcribe_audio(&config, &mut session, mic_chunks, app_chunks)?;
 
     // Save session
     let store =
@@ -171,24 +170,33 @@ fn build_session(config: &AppConfig, mic_samples: usize, app_samples: usize) -> 
         model: config.transcription.model.clone(),
         language: config.transcription.language.clone(),
         gpu_backend: config.transcription.gpu_backend.clone(),
+        diarization_mode: config.transcription.diarization_mode.clone(),
     };
 
     let mut session = Session::new(audio_sources, config_snapshot);
     let total_samples = mic_samples.max(app_samples);
     session.duration_seconds = (total_samples as u64) / 16_000;
 
-    session.speakers = vec![
-        SpeakerMapping {
-            id: "You".to_owned(),
-            friendly_name: "You".to_owned(),
-            source: SpeakerSource::Microphone,
-        },
-        SpeakerMapping {
-            id: "Remote".to_owned(),
-            friendly_name: "Remote".to_owned(),
-            source: SpeakerSource::Remote,
-        },
-    ];
+    if config.transcription.diarization_mode == "none" {
+        session.speakers = vec![SpeakerMapping {
+            id: "Speaker".to_owned(),
+            friendly_name: "Speaker".to_owned(),
+            source: SpeakerSource::Unknown,
+        }];
+    } else {
+        session.speakers = vec![
+            SpeakerMapping {
+                id: "You".to_owned(),
+                friendly_name: "You".to_owned(),
+                source: SpeakerSource::Microphone,
+            },
+            SpeakerMapping {
+                id: "Remote".to_owned(),
+                friendly_name: "Remote".to_owned(),
+                source: SpeakerSource::Remote,
+            },
+        ];
+    }
 
     session
 }
@@ -317,12 +325,15 @@ fn resolve_source(
     }
 }
 
-/// Transcribe mic and app audio chunks into the session transcript.
+/// Transcribe audio chunks into the session transcript.
 ///
-/// Speaker attribution is purely stream-based: mic audio → "You", app
-/// audio → "Remote". Echo deduplication removes "Remote" segments that
-/// duplicate "You" segments (the user's voice leaking into the app stream).
+/// When `diarization_mode` is `"none"` (default), both streams are merged
+/// into a single audio buffer and transcribed once with all segments
+/// labelled `"Speaker"`.  This avoids the stream-based attribution
+/// problems where mic picks up both speakers and the app stream may be
+/// silent or misconfigured.
 fn transcribe_audio(
+    config: &AppConfig,
     session: &mut Session,
     mic_chunks: Vec<AudioChunk>,
     app_chunks: Vec<AudioChunk>,
@@ -339,7 +350,7 @@ fn transcribe_audio(
             model: session.config_snapshot.model.clone(),
             language: session.config_snapshot.language.clone(),
             gpu_backend: session.config_snapshot.gpu_backend.clone(),
-            model_path: String::new(),
+            ..vox_core::config::TranscriptionConfig::default()
         };
         vox_transcribe::WhisperTranscriber::from_config(&tc)
             .map_err(|e| anyhow::anyhow!("failed to load Whisper model: {e}"))?
@@ -347,42 +358,44 @@ fn transcribe_audio(
     #[cfg(not(feature = "whisper"))]
     let transcriber = vox_transcribe::StubTranscriber::new();
 
-    let mic_audio: Vec<f32> = mic_chunks.into_iter().flat_map(|c| c.samples).collect();
-    let app_audio: Vec<f32> = app_chunks.into_iter().flat_map(|c| c.samples).collect();
+    // Merge both streams into a single audio buffer and transcribe once.
+    let merged = crate::audio_merge::merge_chunks(&mic_chunks, &app_chunks);
 
-    if !mic_audio.is_empty() {
-        let request = TranscriptionRequest::new(mic_audio, AudioSourceRole::Microphone);
-        let result = transcriber
-            .transcribe(&request)
-            .map_err(|e| anyhow::anyhow!("mic transcription failed: {e}"))?;
-        tracing::info!("mic produced {} segments", result.segments.len());
-        session.transcript.extend(result.segments);
-    } else {
+    if merged.is_empty() {
+        tracing::warn!("no audio to transcribe after merging streams");
+        return Ok(());
+    }
+
+    let merged_duration = {
+        #[allow(clippy::cast_precision_loss)]
+        let d = merged.len() as f64 / 16_000.0;
+        d
+    };
+    tracing::info!(
+        "merged audio: {} samples ({:.1}s)",
+        merged.len(),
+        merged_duration
+    );
+
+    let request = TranscriptionRequest::new(merged.clone(), AudioSourceRole::Merged);
+    let result = transcriber
+        .transcribe(&request)
+        .map_err(|e| anyhow::anyhow!("transcription failed: {e}"))?;
+
+    tracing::info!("transcription produced {} segments", result.segments.len());
+    session.transcript = result.segments;
+
+    // Run speaker diarization if configured and available.
+    #[cfg(feature = "diarize")]
+    if config.transcription.diarization_mode == "embedding" {
+        run_diarization(config, session, &merged, &mic_chunks)?;
+    }
+    #[cfg(not(feature = "diarize"))]
+    if config.transcription.diarization_mode == "embedding" {
         tracing::warn!(
-            "mic stream produced no audio — check that the correct microphone \
-             node is selected (see `vox-daemon list-sources`)"
+            "diarization_mode is 'embedding' but the `diarize` feature is not enabled; \
+             skipping diarization"
         );
-    }
-
-    if !app_audio.is_empty() {
-        let request = TranscriptionRequest::new(app_audio, AudioSourceRole::Application);
-        let result = transcriber
-            .transcribe(&request)
-            .map_err(|e| anyhow::anyhow!("app transcription failed: {e}"))?;
-        tracing::info!("app produced {} segments", result.segments.len());
-        session.transcript.extend(result.segments);
-    }
-
-    // Remove echo/duplicate segments: when the mic picks up the user's voice
-    // AND the application stream also carries it (loopback, monitor, or the
-    // call echoing back), the same words appear under both "You" and "Remote".
-    // We keep the mic (You) version and drop any app (Remote) segment whose
-    // time window overlaps a mic segment and whose text is similar.
-    let before = session.transcript.len();
-    deduplicate_echo_segments(&mut session.transcript);
-    let removed = before - session.transcript.len();
-    if removed > 0 {
-        tracing::info!("removed {removed} echo/duplicate segments");
     }
 
     session.transcript.sort_by(|a, b| {
@@ -395,6 +408,69 @@ fn transcribe_audio(
         "transcription complete: {} segments",
         session.transcript.len()
     );
+    Ok(())
+}
+
+/// Run ONNX-based speaker diarization on the transcribed segments.
+#[cfg(feature = "diarize")]
+#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn run_diarization(
+    config: &AppConfig,
+    session: &mut Session,
+    merged_audio: &[f32],
+    mic_chunks: &[AudioChunk],
+) -> Result<()> {
+    tracing::info!("running speaker diarization...");
+
+    let model_path = vox_diarize::model::resolve_model_path(&config.transcription.diarize_model_path)
+        .map_err(|e| anyhow::anyhow!("diarization model error: {e}"))?;
+
+    let diarizer = vox_diarize::OnnxDiarizer::from_model_path(
+        &model_path,
+        config.transcription.diarize_threshold,
+    )
+    .map_err(|e| anyhow::anyhow!("failed to load diarization model: {e}"))?;
+
+    // Build enrollment audio from the first N seconds of mic-only chunks.
+    let enrollment_samples = (config.transcription.enrollment_seconds * 16_000.0) as usize;
+    let enrollment: Vec<f32> = mic_chunks
+        .iter()
+        .flat_map(|c| c.samples.iter().copied())
+        .take(enrollment_samples)
+        .collect();
+
+    let enrollment_ref = if enrollment.len() >= 8_000 {
+        // Need at least 0.5s for useful enrollment.
+        Some(enrollment.as_slice())
+    } else {
+        tracing::warn!(
+            "insufficient mic audio for enrollment ({} samples); \
+             'You' identification will be skipped",
+            enrollment.len()
+        );
+        None
+    };
+
+    let request = vox_diarize::DiarizationRequest {
+        segments: &session.transcript,
+        audio: merged_audio,
+        enrollment: enrollment_ref,
+    };
+
+    match vox_diarize::Diarizer::diarize(&diarizer, &request) {
+        Ok(result) => {
+            session.transcript = result.segments;
+            session.speakers = result.speakers;
+            tracing::info!(
+                "diarization complete: {} speakers identified",
+                session.speakers.len()
+            );
+        }
+        Err(e) => {
+            tracing::warn!("diarization failed, keeping undiarized transcript: {e}");
+        }
+    }
+
     Ok(())
 }
 
@@ -433,88 +509,4 @@ fn log_audio_diagnostics(label: &str, chunks: &[AudioChunk]) {
     }
 }
 
-/// Remove "Remote" segments that are echoes of "You" segments.
-///
-/// An app-stream segment is considered an echo when:
-/// 1. Its time window overlaps with a mic segment (within a tolerance), AND
-/// 2. Its text is similar to the mic segment's text (word overlap >= 50%).
-///
-/// This handles the common case where the user's mic audio leaks into the
-/// application stream via PipeWire monitor/loopback or the call echoes back.
-fn deduplicate_echo_segments(segments: &mut Vec<TranscriptSegment>) {
-    // Collect mic segment data for comparison (avoid borrow conflicts with retain).
-    let mic_segments: Vec<(f64, f64, String)> = segments
-        .iter()
-        .filter(|s| s.speaker == "You")
-        .map(|s| (s.start_time, s.end_time, s.text.clone()))
-        .collect();
-
-    if mic_segments.is_empty() {
-        return;
-    }
-
-    // Time overlap tolerance in seconds — accounts for slight offset between
-    // the two streams being transcribed independently.
-    const TIME_TOLERANCE: f64 = 3.0;
-
-    segments.retain(|seg| {
-        if seg.speaker != "Remote" {
-            return true; // keep all non-Remote segments
-        }
-
-        // Check if this Remote segment overlaps any mic segment with similar text.
-        let is_echo = mic_segments.iter().any(|(mic_start, mic_end, mic_text)| {
-            let time_overlaps = seg.start_time <= mic_end + TIME_TOLERANCE
-                && seg.end_time >= mic_start - TIME_TOLERANCE;
-
-            if !time_overlaps {
-                return false;
-            }
-
-            word_similarity(&seg.text, mic_text) >= 0.5
-        });
-
-        if is_echo {
-            tracing::debug!(
-                start = seg.start_time,
-                text = %seg.text,
-                "dropping echo segment"
-            );
-        }
-
-        !is_echo
-    });
-}
-
-/// Compute word-level Jaccard similarity between two strings.
-///
-/// Returns a value in `[0.0, 1.0]` where 1.0 means identical word sets.
-fn word_similarity(a: &str, b: &str) -> f64 {
-    let normalize = |s: &str| -> Vec<String> {
-        s.split_whitespace()
-            .map(|w| {
-                w.trim_matches(|c: char| !c.is_alphanumeric())
-                    .to_lowercase()
-            })
-            .filter(|w| !w.is_empty())
-            .collect()
-    };
-
-    let words_a: std::collections::HashSet<String> = normalize(a).into_iter().collect();
-    let words_b: std::collections::HashSet<String> = normalize(b).into_iter().collect();
-
-    if words_a.is_empty() && words_b.is_empty() {
-        return 1.0;
-    }
-    if words_a.is_empty() || words_b.is_empty() {
-        return 0.0;
-    }
-
-    let intersection = words_a.intersection(&words_b).count();
-    let union = words_a.union(&words_b).count();
-
-    #[allow(clippy::cast_precision_loss)]
-    let similarity = intersection as f64 / union as f64;
-    similarity
-}
 

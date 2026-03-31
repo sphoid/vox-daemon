@@ -201,6 +201,7 @@ mod tests {
                 model: "base".to_owned(),
                 language: "en".to_owned(),
                 gpu_backend: "auto".to_owned(),
+                diarization_mode: "none".to_owned(),
             },
         )
     }

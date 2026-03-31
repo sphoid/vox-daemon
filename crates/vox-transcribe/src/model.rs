@@ -381,10 +381,8 @@ mod tests {
     #[test]
     fn test_resolve_model_path_custom_missing_file() {
         let config = TranscriptionConfig {
-            model: "base".to_owned(),
-            language: "en".to_owned(),
-            gpu_backend: "auto".to_owned(),
             model_path: "/nonexistent/path/model.bin".to_owned(),
+            ..TranscriptionConfig::default()
         };
         // Custom paths are never downloaded automatically; missing → error.
         assert!(resolve_model_path(&config).is_err());
@@ -397,10 +395,8 @@ mod tests {
         std::fs::write(&model_file, b"fake model data").expect("write fake model");
 
         let config = TranscriptionConfig {
-            model: "base".to_owned(),
-            language: "en".to_owned(),
-            gpu_backend: "auto".to_owned(),
             model_path: model_file.to_str().unwrap().to_owned(),
+            ..TranscriptionConfig::default()
         };
         let result = resolve_model_path(&config);
         assert!(result.is_ok());
@@ -411,9 +407,7 @@ mod tests {
     fn test_is_model_downloaded_false_when_missing() {
         let config = TranscriptionConfig {
             model: "large".to_owned(),
-            language: "en".to_owned(),
-            gpu_backend: "auto".to_owned(),
-            model_path: String::new(),
+            ..TranscriptionConfig::default()
         };
         // This test relies on the model not actually being present in CI.
         // It does not fail if the model is downloaded; it just verifies the
@@ -428,10 +422,8 @@ mod tests {
         std::fs::write(&model_file, b"fake").expect("write");
 
         let config = TranscriptionConfig {
-            model: "base".to_owned(),
-            language: "en".to_owned(),
-            gpu_backend: "auto".to_owned(),
             model_path: model_file.to_str().unwrap().to_owned(),
+            ..TranscriptionConfig::default()
         };
         assert!(is_model_downloaded(&config));
     }
@@ -452,11 +444,10 @@ mod tests {
 
         let config = TranscriptionConfig {
             model: "tiny".to_owned(),
-            language: "en".to_owned(),
-            gpu_backend: "auto".to_owned(),
             // Override model_path so resolve_model_path uses the custom path
             // (no download attempted for custom paths).
             model_path: model_file.to_str().unwrap().to_owned(),
+            ..TranscriptionConfig::default()
         };
 
         let result = resolve_model_path(&config);

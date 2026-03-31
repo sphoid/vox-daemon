@@ -16,6 +16,7 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+rfd = { workspace = true, optional = true }
 
 [dependencies.iced]
 version = "0.14"
@@ -24,7 +25,7 @@ features = ["tokio"]
 
 [features]
 default = []
-ui = ["dep:iced"]
+ui = ["dep:iced", "dep:rfd"]
 pw = ["vox-capture/pw"]
 
 [dev-dependencies]

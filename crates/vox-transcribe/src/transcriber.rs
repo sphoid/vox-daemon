@@ -5,16 +5,19 @@ use vox_core::session::TranscriptSegment;
 
 /// The role of the audio stream being transcribed.
 ///
-/// This drives the v1 speaker-diarization strategy: audio from a
-/// [`AudioSourceRole::Microphone`] stream is labelled `"You"` in each
-/// [`TranscriptSegment`], while audio from an
-/// [`AudioSourceRole::Application`] stream is labelled `"Remote"`.
+/// - [`Microphone`](Self::Microphone) / [`Application`](Self::Application) are
+///   used for per-stream transcription (legacy stream-based diarization).
+/// - [`Merged`](Self::Merged) is used when both streams have been mixed into a
+///   single audio buffer for unified transcription (the default since the
+///   stream-based approach proved unreliable).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AudioSourceRole {
     /// The local user's microphone.
     Microphone,
     /// Remote participant audio captured from an application stream.
     Application,
+    /// Merged audio from all streams (undiarized).
+    Merged,
 }
 
 impl AudioSourceRole {
@@ -24,6 +27,7 @@ impl AudioSourceRole {
         match self {
             Self::Microphone => "You",
             Self::Application => "Remote",
+            Self::Merged => "Speaker",
         }
     }
 }
@@ -150,6 +154,11 @@ mod tests {
     #[test]
     fn test_speaker_label_application() {
         assert_eq!(AudioSourceRole::Application.speaker_label(), "Remote");
+    }
+
+    #[test]
+    fn test_speaker_label_merged() {
+        assert_eq!(AudioSourceRole::Merged.speaker_label(), "Speaker");
     }
 
     #[test]
