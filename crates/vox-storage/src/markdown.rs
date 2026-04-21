@@ -235,6 +235,8 @@ mod tests {
                 language: "en".to_owned(),
                 gpu_backend: "auto".to_owned(),
                 diarization_mode: "none".to_owned(),
+                decoding_strategy: String::new(),
+                initial_prompt: String::new(),
             },
         )
     }

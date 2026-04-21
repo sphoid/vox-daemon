@@ -66,8 +66,9 @@ pub struct WhisperTranscriber {
     /// inference begins, keeping contention minimal.
     ctx: Mutex<WhisperContext>,
 
-    /// BCP-47 language code (e.g. `"en"`) or `"auto"` for detection.
-    language: String,
+    /// Full transcription configuration controlling decoding strategy,
+    /// language, thresholds, and initial prompt.
+    config: TranscriptionConfig,
 }
 
 // SAFETY: `WhisperContext` wraps a raw pointer to whisper.cpp's C struct.
@@ -82,13 +83,13 @@ unsafe impl Sync for WhisperTranscriber {}
 impl std::fmt::Debug for WhisperTranscriber {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WhisperTranscriber")
-            .field("language", &self.language)
+            .field("language", &self.config.language)
             .finish_non_exhaustive()
     }
 }
 
 impl WhisperTranscriber {
-    /// Loads a Whisper model from the given filesystem path.
+    /// Loads a Whisper model from the given filesystem path with the supplied configuration.
     ///
     /// This function performs synchronous file I/O and CPU-bound model
     /// initialisation — it can take several seconds for large models.  Call it
@@ -97,9 +98,9 @@ impl WhisperTranscriber {
     /// # Parameters
     ///
     /// - `model_path`: Path to a GGML-format `.bin` model file (e.g.,
-    ///   `ggml-base.bin`).
-    /// - `language`: BCP-47 language code such as `"en"`, or `"auto"` to
-    ///   enable whisper.cpp's built-in language detection.
+    ///   `ggml-small.bin`).
+    /// - `config`: Full [`TranscriptionConfig`] controlling language, decoding
+    ///   strategy, thresholds, and initial prompt conditioning.
     ///
     /// # Errors
     ///
@@ -109,7 +110,7 @@ impl WhisperTranscriber {
     #[instrument(skip_all, fields(model_path = %model_path.as_ref().display()))]
     pub fn new(
         model_path: impl AsRef<Path>,
-        language: impl Into<String>,
+        config: TranscriptionConfig,
     ) -> Result<Self, TranscribeError> {
         let model_path = model_path.as_ref();
         info!("loading Whisper model from '{}'", model_path.display());
@@ -122,18 +123,22 @@ impl WhisperTranscriber {
         let ctx = WhisperContext::new_with_params(path_str, ctx_params)
             .map_err(|e| TranscribeError::ModelLoad(e.to_string()))?;
 
-        info!("Whisper model loaded successfully");
+        info!(
+            model = %config.model,
+            strategy = %config.decoding_strategy,
+            "Whisper model loaded successfully"
+        );
 
         Ok(Self {
             ctx: Mutex::new(ctx),
-            language: language.into(),
+            config,
         })
     }
 
     /// Creates a [`WhisperTranscriber`] from a [`TranscriptionConfig`].
     ///
     /// Resolves the model path via [`crate::model::resolve_model_path`] and
-    /// uses the language setting from the config.
+    /// forwards the full config for decoding parameter control.
     ///
     /// # Errors
     ///
@@ -141,18 +146,28 @@ impl WhisperTranscriber {
     /// located or loaded.
     pub fn from_config(config: &TranscriptionConfig) -> Result<Self, TranscribeError> {
         let model_path = resolve_model_path(config)?;
-        Self::new(model_path, config.language.clone())
+        Self::new(model_path, config.clone())
     }
 
     /// Constructs the [`FullParams`] for a single inference pass.
     fn build_params<'a>(&'a self, speaker_label: &str) -> FullParams<'a, 'a> {
-        let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+        let strategy = match self.config.decoding_strategy.as_str() {
+            "greedy" => SamplingStrategy::Greedy {
+                best_of: self.config.best_of,
+            },
+            _ => SamplingStrategy::BeamSearch {
+                beam_size: self.config.beam_size,
+                patience: -1.0,
+            },
+        };
 
-        if self.language == "auto" {
+        let mut params = FullParams::new(strategy);
+
+        if self.config.language == "auto" {
             params.set_language(None);
             params.set_detect_language(true);
         } else {
-            params.set_language(Some(self.language.as_str()));
+            params.set_language(Some(self.config.language.as_str()));
             params.set_detect_language(false);
         }
 
@@ -160,7 +175,21 @@ impl WhisperTranscriber {
         params.set_token_timestamps(true);
 
         // Suppress spurious output from silent segments.
-        params.set_no_speech_thold(0.6);
+        params.set_no_speech_thold(self.config.no_speech_thold);
+
+        // Temperature and fallback settings.
+        params.set_temperature(self.config.temperature);
+        params.set_temperature_inc(self.config.temperature_inc);
+
+        // Entropy and log-probability thresholds for fallback.
+        params.set_entropy_thold(self.config.entropy_thold);
+        params.set_logprob_thold(self.config.logprob_thold);
+
+        // Initial prompt conditioning for domain-specific vocabulary.
+        if !self.config.initial_prompt.is_empty() {
+            let sanitized = self.config.initial_prompt.replace('\0', "");
+            params.set_initial_prompt(&sanitized);
+        }
 
         // We want the original speech, not an English translation.
         params.set_translate(false);
@@ -170,7 +199,12 @@ impl WhisperTranscriber {
         params.set_print_realtime(false);
         params.set_print_timestamps(false);
 
-        debug!(speaker = speaker_label, language = %self.language, "whisper params configured");
+        debug!(
+            speaker = speaker_label,
+            language = %self.config.language,
+            strategy = %self.config.decoding_strategy,
+            "whisper params configured"
+        );
 
         params
     }

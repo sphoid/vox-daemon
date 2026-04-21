@@ -127,12 +127,49 @@ pub struct TranscriptionConfig {
     /// enrollment for identifying the local user's voice.
     #[serde(default = "default_enrollment_seconds")]
     pub enrollment_seconds: f64,
+
+    /// Decoding strategy: `"greedy"` or `"beam_search"`.
+    #[serde(default = "default_decoding_strategy")]
+    pub decoding_strategy: String,
+
+    /// Beam width for beam search decoding. Only used when `decoding_strategy` is `"beam_search"`.
+    #[serde(default = "default_beam_size")]
+    pub beam_size: i32,
+
+    /// Number of candidates for greedy decoding. Only used when `decoding_strategy` is `"greedy"`.
+    #[serde(default = "default_best_of")]
+    pub best_of: i32,
+
+    /// Initial prompt to condition the decoder. Include participant names, technical
+    /// terms, and domain vocabulary to reduce misrecognition of similar-sounding words.
+    #[serde(default)]
+    pub initial_prompt: String,
+
+    /// Initial decoding temperature. `0.0` is most confident.
+    #[serde(default)]
+    pub temperature: f32,
+
+    /// Temperature increment for fallback retries. `0.0` disables fallback.
+    #[serde(default = "default_temperature_inc")]
+    pub temperature_inc: f32,
+
+    /// Entropy threshold — segments with higher entropy trigger temperature fallback retries.
+    #[serde(default = "default_entropy_thold")]
+    pub entropy_thold: f32,
+
+    /// Average log probability threshold — segments below this trigger fallback retries.
+    #[serde(default = "default_logprob_thold")]
+    pub logprob_thold: f32,
+
+    /// No-speech probability threshold — segments above this are suppressed.
+    #[serde(default = "default_no_speech_thold")]
+    pub no_speech_thold: f32,
 }
 
 impl Default for TranscriptionConfig {
     fn default() -> Self {
         Self {
-            model: "base".to_owned(),
+            model: "small".to_owned(),
             language: "en".to_owned(),
             gpu_backend: "auto".to_owned(),
             model_path: String::new(),
@@ -140,6 +177,15 @@ impl Default for TranscriptionConfig {
             diarize_model_path: String::new(),
             diarize_threshold: 0.5,
             enrollment_seconds: 5.0,
+            decoding_strategy: "beam_search".to_owned(),
+            beam_size: 5,
+            best_of: 5,
+            initial_prompt: String::new(),
+            temperature: 0.0,
+            temperature_inc: 0.2,
+            entropy_thold: 2.4,
+            logprob_thold: -1.0,
+            no_speech_thold: 0.6,
         }
     }
 }
@@ -258,7 +304,7 @@ fn default_auto() -> String {
 }
 
 fn default_model() -> String {
-    "base".to_owned()
+    "small".to_owned()
 }
 
 fn default_language() -> String {
@@ -297,6 +343,34 @@ fn default_enrollment_seconds() -> f64 {
     5.0
 }
 
+fn default_decoding_strategy() -> String {
+    "beam_search".to_owned()
+}
+
+fn default_beam_size() -> i32 {
+    5
+}
+
+fn default_best_of() -> i32 {
+    5
+}
+
+fn default_temperature_inc() -> f32 {
+    0.2
+}
+
+fn default_entropy_thold() -> f32 {
+    2.4
+}
+
+fn default_logprob_thold() -> f32 {
+    -1.0
+}
+
+fn default_no_speech_thold() -> f32 {
+    0.6
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -318,7 +392,7 @@ mic_source = "alsa_input.usb"
         let config: AppConfig = toml::from_str(toml_str).expect("parse");
         assert_eq!(config.audio.mic_source, "alsa_input.usb");
         assert_eq!(config.audio.app_source, "auto");
-        assert_eq!(config.transcription.model, "base");
+        assert_eq!(config.transcription.model, "small");
     }
 
     #[test]

@@ -91,6 +91,12 @@ pub struct ConfigSnapshot {
     /// Diarization mode: `"none"` or `"embedding"`.
     #[serde(default = "default_diarization_mode")]
     pub diarization_mode: String,
+    /// Decoding strategy used: `"greedy"` or `"beam_search"`.
+    #[serde(default)]
+    pub decoding_strategy: String,
+    /// Initial prompt used to condition the decoder.
+    #[serde(default)]
+    pub initial_prompt: String,
 }
 
 fn default_diarization_mode() -> String {
@@ -177,6 +183,8 @@ mod tests {
             language: "en".to_owned(),
             gpu_backend: "auto".to_owned(),
             diarization_mode: "none".to_owned(),
+            decoding_strategy: "beam_search".to_owned(),
+            initial_prompt: String::new(),
         };
         let session = Session::new(sources, config);
         assert_eq!(session.duration_seconds, 0);
@@ -204,6 +212,8 @@ mod tests {
                 language: "auto".to_owned(),
                 gpu_backend: "cuda".to_owned(),
                 diarization_mode: "none".to_owned(),
+                decoding_strategy: "beam_search".to_owned(),
+                initial_prompt: String::new(),
             },
         );
 

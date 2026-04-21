@@ -44,7 +44,21 @@ pub async fn record_session(
 
     let mut session = build_session(&config, mic_sample_count, app_sample_count);
 
-    transcribe_audio(&config, &mut session, mic_chunks, app_chunks)?;
+    let merged = transcribe_audio(&config, &mut session, mic_chunks, app_chunks)?;
+
+    // Optionally retain the raw audio for later reprocessing.
+    if config.storage.retain_audio && !merged.is_empty() {
+        let wav_path = vox_core::paths::sessions_dir_or(&config.storage.data_dir)
+            .join(format!("{}.wav", session.id));
+        match crate::audio_save::save_wav(&wav_path, &merged) {
+            Ok(()) => {
+                session.audio_file_path = Some(wav_path.display().to_string());
+            }
+            Err(e) => {
+                tracing::warn!("failed to save audio file (continuing without it): {e}");
+            }
+        }
+    }
 
     // Save session
     let store =
@@ -171,6 +185,8 @@ fn build_session(config: &AppConfig, mic_samples: usize, app_samples: usize) -> 
         language: config.transcription.language.clone(),
         gpu_backend: config.transcription.gpu_backend.clone(),
         diarization_mode: config.transcription.diarization_mode.clone(),
+        decoding_strategy: config.transcription.decoding_strategy.clone(),
+        initial_prompt: config.transcription.initial_prompt.clone(),
     };
 
     let mut session = Session::new(audio_sources, config_snapshot);
@@ -332,12 +348,13 @@ fn resolve_source(
 /// labelled `"Speaker"`.  This avoids the stream-based attribution
 /// problems where mic picks up both speakers and the app stream may be
 /// silent or misconfigured.
+/// Returns the merged audio buffer so it can optionally be saved to disk.
 fn transcribe_audio(
     config: &AppConfig,
     session: &mut Session,
     mic_chunks: Vec<AudioChunk>,
     app_chunks: Vec<AudioChunk>,
-) -> Result<()> {
+) -> Result<Vec<f32>> {
     tracing::info!("starting transcription...");
 
     // Log audio diagnostics to help troubleshoot source selection issues.
@@ -346,13 +363,7 @@ fn transcribe_audio(
 
     #[cfg(feature = "whisper")]
     let transcriber = {
-        let tc = vox_core::config::TranscriptionConfig {
-            model: session.config_snapshot.model.clone(),
-            language: session.config_snapshot.language.clone(),
-            gpu_backend: session.config_snapshot.gpu_backend.clone(),
-            ..vox_core::config::TranscriptionConfig::default()
-        };
-        vox_transcribe::WhisperTranscriber::from_config(&tc)
+        vox_transcribe::WhisperTranscriber::from_config(&config.transcription)
             .map_err(|e| anyhow::anyhow!("failed to load Whisper model: {e}"))?
     };
     #[cfg(not(feature = "whisper"))]
@@ -363,7 +374,7 @@ fn transcribe_audio(
 
     if merged.is_empty() {
         tracing::warn!("no audio to transcribe after merging streams");
-        return Ok(());
+        return Ok(Vec::new());
     }
 
     let merged_duration = {
@@ -408,7 +419,7 @@ fn transcribe_audio(
         "transcription complete: {} segments",
         session.transcript.len()
     );
-    Ok(())
+    Ok(merged)
 }
 
 /// Run ONNX-based speaker diarization on the transcribed segments.
@@ -507,6 +518,95 @@ fn log_audio_diagnostics(label: &str, chunks: &[AudioChunk]) {
              silent or connected to the wrong PipeWire node"
         );
     }
+}
+
+/// Re-transcribe a previously recorded session using its saved audio file.
+///
+/// Loads the session and its retained WAV audio, runs transcription with the
+/// current [`AppConfig::transcription`] settings, and overwrites the old
+/// transcript.  This allows iterating on transcription parameters without
+/// re-recording.
+pub fn reprocess_session(config: &AppConfig, session_id: &str) -> Result<()> {
+    use uuid::Uuid;
+
+    let id: Uuid = session_id.parse().context("invalid session UUID")?;
+
+    let store =
+        JsonFileStore::new(&config.storage.data_dir).context("failed to open session store")?;
+    let mut session = store.load(id).context("failed to load session")?;
+
+    let audio_path = session
+        .audio_file_path
+        .as_deref()
+        .filter(|p| !p.is_empty())
+        .context(
+            "session has no retained audio file — \
+             enable `storage.retain_audio` before recording to use reprocessing",
+        )?;
+
+    let audio_path = std::path::Path::new(audio_path);
+    anyhow::ensure!(
+        audio_path.exists(),
+        "audio file not found: {}",
+        audio_path.display()
+    );
+
+    let samples = crate::audio_save::load_wav(audio_path)
+        .context("failed to load audio file for reprocessing")?;
+
+    let old_segment_count = session.transcript.len();
+
+    // Build transcriber with current config settings.
+    #[cfg(feature = "whisper")]
+    let transcriber = {
+        vox_transcribe::WhisperTranscriber::from_config(&config.transcription)
+            .map_err(|e| anyhow::anyhow!("failed to load Whisper model: {e}"))?
+    };
+    #[cfg(not(feature = "whisper"))]
+    let transcriber = vox_transcribe::StubTranscriber::new();
+
+    let request = TranscriptionRequest::new(samples.clone(), AudioSourceRole::Merged);
+    let result = transcriber
+        .transcribe(&request)
+        .map_err(|e| anyhow::anyhow!("transcription failed: {e}"))?;
+
+    session.transcript = result.segments;
+
+    // Re-run diarization if configured.
+    #[cfg(feature = "diarize")]
+    if config.transcription.diarization_mode == "embedding" {
+        // For reprocessing we don't have separate mic chunks, so skip enrollment.
+        tracing::info!("diarization not available during reprocessing (no separate mic audio)");
+    }
+
+    session.transcript.sort_by(|a, b| {
+        a.start_time
+            .partial_cmp(&b.start_time)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    // Update config snapshot to reflect the settings used for this reprocessing.
+    session.config_snapshot = ConfigSnapshot {
+        model: config.transcription.model.clone(),
+        language: config.transcription.language.clone(),
+        gpu_backend: config.transcription.gpu_backend.clone(),
+        diarization_mode: config.transcription.diarization_mode.clone(),
+        decoding_strategy: config.transcription.decoding_strategy.clone(),
+        initial_prompt: config.transcription.initial_prompt.clone(),
+    };
+
+    store
+        .save(&session)
+        .context("failed to save reprocessed session")?;
+
+    println!(
+        "Session {} reprocessed: {} → {} segments",
+        session.id,
+        old_segment_count,
+        session.transcript.len()
+    );
+
+    Ok(())
 }
 
 

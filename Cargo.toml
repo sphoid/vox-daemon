@@ -44,6 +44,7 @@ crossbeam-channel = "0.5"
 clap = { version = "4", features = ["derive"] }
 reqwest = { version = "0.12", features = ["json"] }
 rfd = "0.15"
+hound = "3.5"
 
 # Workspace crate cross-references
 vox-core = { path = "crates/vox-core" }

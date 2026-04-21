@@ -12,6 +12,7 @@ use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
 mod audio_merge;
+mod audio_save;
 mod daemon;
 mod recording;
 
@@ -64,6 +65,12 @@ enum Command {
     /// Export a session to Markdown.
     Export {
         /// Session UUID to export.
+        session_id: String,
+    },
+
+    /// Re-transcribe a session using its saved audio file and current settings.
+    Reprocess {
+        /// Session UUID to reprocess.
         session_id: String,
     },
 
@@ -164,6 +171,9 @@ async fn async_main(cli: Cli) -> Result<()> {
         }
         Command::Export { session_id } => {
             export_session(&config, &session_id)?;
+        }
+        Command::Reprocess { session_id } => {
+            recording::reprocess_session(&config, &session_id)?;
         }
     }
 
