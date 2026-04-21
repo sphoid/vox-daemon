@@ -146,9 +146,7 @@ pub fn is_model_downloaded(config: &TranscriptionConfig) -> bool {
         return Path::new(&config.model_path).exists();
     }
 
-    ModelSize::from_str(&config.model)
-        .map(|size| default_model_path(size).exists())
-        .unwrap_or(false)
+    ModelSize::from_str(&config.model).is_ok_and(|size| default_model_path(size).exists())
 }
 
 /// Downloads a Whisper model file from Hugging Face and writes it to `dest`.
@@ -166,7 +164,11 @@ pub fn is_model_downloaded(config: &TranscriptionConfig) -> bool {
 /// - failure to create the cache directory
 /// - HTTP request failure or non-200 status
 /// - I/O error while writing the temporary file or renaming it
+#[allow(clippy::too_many_lines)]
 pub fn download_model(size: ModelSize, dest: &Path) -> Result<(), TranscribeError> {
+    // Report progress every 50 MiB.
+    const PROGRESS_INTERVAL_BYTES: u64 = 50 * 1_048_576;
+
     let url = size.download_url();
 
     // Ensure the parent directory exists.
@@ -232,11 +234,10 @@ pub fn download_model(size: ModelSize, dest: &Path) -> Result<(), TranscribeErro
     })?;
 
     let mut downloaded: u64 = 0;
-    // Report progress every 50 MiB.
-    const PROGRESS_INTERVAL_BYTES: u64 = 50 * 1_048_576;
     let mut next_report = PROGRESS_INTERVAL_BYTES;
 
-    let mut buf = [0u8; 65_536]; // 64 KiB read buffer
+    // 64 KiB heap-allocated read buffer (too large for the stack).
+    let mut buf = vec![0u8; 65_536].into_boxed_slice();
     loop {
         use std::io::Read as _;
         let n = response.read(&mut buf).map_err(|e| {

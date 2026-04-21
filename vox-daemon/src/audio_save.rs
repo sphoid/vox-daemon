@@ -70,10 +70,12 @@ pub fn load_wav(path: &Path) -> Result<Vec<f32>> {
         })
         .collect::<Result<Vec<f32>>>()?;
 
+    #[allow(clippy::cast_precision_loss)]
+    let duration_secs = samples.len() as f64 / 16_000.0;
     tracing::info!(
         "loaded {} samples ({:.1}s) from {}",
         samples.len(),
-        samples.len() as f64 / 16_000.0,
+        duration_secs,
         path.display()
     );
 
