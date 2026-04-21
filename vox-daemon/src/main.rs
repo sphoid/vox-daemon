@@ -204,7 +204,7 @@ fn list_sources() -> Result<()> {
         return Ok(());
     }
 
-    println!("{:<8} {:<40} {:<16} {}", "Node ID", "Name", "Class", "App");
+    println!("{:<8} {:<40} {:<16} App", "Node ID", "Name", "Class");
     println!("{}", "-".repeat(85));
     for stream in &streams {
         let display_name = stream.description.as_deref().unwrap_or(&stream.name);

@@ -82,7 +82,7 @@ pub struct StreamInfo {
 
     /// Human-friendly description (e.g., `"Built-in Audio Analog Stereo"`).
     ///
-    /// Sourced from the `node.description` or `node.nick` PipeWire property.
+    /// Sourced from the `node.description` or `node.nick` `PipeWire` property.
     /// Falls back to [`name`](Self::name) if neither is available.
     pub description: Option<String>,
 
@@ -101,7 +101,7 @@ impl StreamInfo {
     ///
     /// Heuristic: media class contains `"Source"` (but not `"Virtual"`) and
     /// the node name does not indicate a monitor or loopback device. This
-    /// avoids selecting PipeWire monitor/loopback nodes that capture system
+    /// avoids selecting `PipeWire` monitor/loopback nodes that capture system
     /// audio rather than the user's voice.
     #[must_use]
     pub fn is_source(&self) -> bool {

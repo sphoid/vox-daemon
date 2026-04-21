@@ -1,6 +1,6 @@
 //! Native Ollama HTTP client.
 //!
-//! Uses Ollama's native `/api/chat` endpoint rather than the OpenAI
+//! Uses Ollama's native `/api/chat` endpoint rather than the `OpenAI`
 //! compatibility layer. This avoids subtle incompatibilities with
 //! `response_format`, `max_tokens`, and the response structure.
 

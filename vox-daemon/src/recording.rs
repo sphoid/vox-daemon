@@ -44,7 +44,7 @@ pub async fn record_session(
 
     let mut session = build_session(&config, mic_sample_count, app_sample_count);
 
-    let merged = transcribe_audio(&config, &mut session, mic_chunks, app_chunks)?;
+    let merged = transcribe_audio(&config, &mut session, &mic_chunks, &app_chunks)?;
 
     // Optionally retain the raw audio for later reprocessing.
     if config.storage.retain_audio && !merged.is_empty() {
@@ -342,14 +342,14 @@ fn resolve_source(setting: &str, streams: &[vox_capture::StreamInfo], is_mic: bo
 fn transcribe_audio(
     config: &AppConfig,
     session: &mut Session,
-    mic_chunks: Vec<AudioChunk>,
-    app_chunks: Vec<AudioChunk>,
+    mic_chunks: &[AudioChunk],
+    app_chunks: &[AudioChunk],
 ) -> Result<Vec<f32>> {
     tracing::info!("starting transcription...");
 
     // Log audio diagnostics to help troubleshoot source selection issues.
-    log_audio_diagnostics("mic", &mic_chunks);
-    log_audio_diagnostics("app", &app_chunks);
+    log_audio_diagnostics("mic", mic_chunks);
+    log_audio_diagnostics("app", app_chunks);
 
     #[cfg(feature = "whisper")]
     let transcriber = {
@@ -360,7 +360,7 @@ fn transcribe_audio(
     let transcriber = vox_transcribe::StubTranscriber::new();
 
     // Merge both streams into a single audio buffer and transcribe once.
-    let merged = crate::audio_merge::merge_chunks(&mic_chunks, &app_chunks);
+    let merged = crate::audio_merge::merge_chunks(mic_chunks, app_chunks);
 
     if merged.is_empty() {
         tracing::warn!("no audio to transcribe after merging streams");
@@ -389,7 +389,7 @@ fn transcribe_audio(
     // Run speaker diarization if configured and available.
     #[cfg(feature = "diarize")]
     if config.transcription.diarization_mode == "embedding" {
-        run_diarization(config, session, &merged, &mic_chunks)?;
+        run_diarization(config, session, &merged, mic_chunks)?;
     }
     #[cfg(not(feature = "diarize"))]
     if config.transcription.diarization_mode == "embedding" {
@@ -482,7 +482,7 @@ fn run_diarization(
 
 /// Log diagnostic information about captured audio chunks.
 ///
-/// Helps the user verify that the correct PipeWire nodes were selected and
+/// Helps the user verify that the correct `PipeWire` nodes were selected and
 /// that audio is being captured at a reasonable level.
 #[allow(clippy::cast_precision_loss)]
 fn log_audio_diagnostics(label: &str, chunks: &[AudioChunk]) {
