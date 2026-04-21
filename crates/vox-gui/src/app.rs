@@ -585,8 +585,7 @@ pub fn update(state: &mut VoxAppState, message: Message) -> Task<Message> {
                         include_transcript,
                         include_summary,
                     };
-                    let content =
-                        vox_storage::render_export(&session, &format_str, &options)?;
+                    let content = vox_storage::render_export(&session, &format_str, &options)?;
 
                     let dialog = rfd::AsyncFileDialog::new()
                         .set_title("Export Session")
@@ -599,13 +598,9 @@ pub fn update(state: &mut VoxAppState, message: Message) -> Task<Message> {
                     };
 
                     let path = handle.path().to_path_buf();
-                    std::fs::write(&path, content.as_bytes())
-                        .map_err(|e| e.to_string())?;
+                    std::fs::write(&path, content.as_bytes()).map_err(|e| e.to_string())?;
 
-                    Ok(path
-                        .to_str()
-                        .unwrap_or("<non-utf8 path>")
-                        .to_owned())
+                    Ok(path.to_str().unwrap_or("<non-utf8 path>").to_owned())
                 },
                 Message::ExportResult,
             )
@@ -1034,10 +1029,13 @@ fn view_settings(state: &VoxAppState) -> Element<'_, Message> {
             ),
             column![
                 text("API key").size(13u32),
-                text_input("Stored in plaintext — chmod 600 your config file", &s.summarization.api_key)
-                    .on_input(Message::ApiKeyChanged)
-                    .secure(true)
-                    .width(Fill),
+                text_input(
+                    "Stored in plaintext — chmod 600 your config file",
+                    &s.summarization.api_key
+                )
+                .on_input(Message::ApiKeyChanged)
+                .secure(true)
+                .width(Fill),
             ]
             .spacing(vox_theme::SPACING / 2.0),
             stacked_text_input(
@@ -1251,9 +1249,7 @@ fn view_session_detail(session: &Session, summarizing: bool) -> Element<'_, Mess
         if !summary.key_points.is_empty() {
             col = col.push(text("Key Points:").size(13u32));
             for point in &summary.key_points {
-                col = col.push(
-                    text(format!("  \u{2022} {point}")).size(12u32),
-                );
+                col = col.push(text(format!("  \u{2022} {point}")).size(12u32));
             }
         }
 
@@ -1271,9 +1267,7 @@ fn view_session_detail(session: &Session, summarizing: bool) -> Element<'_, Mess
         if !summary.decisions.is_empty() {
             col = col.push(text("Decisions:").size(13u32));
             for decision in &summary.decisions {
-                col = col.push(
-                    text(format!("  \u{2022} {decision}")).size(12u32),
-                );
+                col = col.push(text(format!("  \u{2022} {decision}")).size(12u32));
             }
         }
 
@@ -1415,9 +1409,7 @@ where
 /// component is clipped.
 fn pick_row<'a>(label: &'a str, picker: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
     row![
-        text(label)
-            .size(13u32)
-            .width(Length::FillPortion(1)),
+        text(label).size(13u32).width(Length::FillPortion(1)),
         container(picker.into()).width(Length::FillPortion(2)),
     ]
     .spacing(vox_theme::SPACING)
@@ -1433,11 +1425,8 @@ where
     F: Fn(bool) -> Message + 'a,
 {
     row![
-        text(label)
-            .size(13u32)
-            .width(Length::FillPortion(3)),
-        toggler(value)
-            .on_toggle(on_toggle),
+        text(label).size(13u32).width(Length::FillPortion(3)),
+        toggler(value).on_toggle(on_toggle),
     ]
     .spacing(vox_theme::SPACING)
     .align_y(iced::Alignment::Center)
@@ -1468,11 +1457,7 @@ pub fn theme(_state: &VoxAppState) -> Theme {
             .map(|v| v.ends_with(";0") || v.ends_with(";black"))
             .unwrap_or(false);
 
-    if is_dark {
-        Theme::Dark
-    } else {
-        Theme::Light
-    }
+    if is_dark { Theme::Dark } else { Theme::Light }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -1528,9 +1513,8 @@ pub fn run_with_page(page: Page, select_latest: bool) -> iced::Result {
 fn enumerate_pipewire_sources() -> Vec<vox_capture::StreamInfo> {
     #[cfg(feature = "pw")]
     {
-        match vox_capture::PipeWireSource::enumerate_streams(
-            &vox_capture::StreamFilter::default(),
-        ) {
+        match vox_capture::PipeWireSource::enumerate_streams(&vox_capture::StreamFilter::default())
+        {
             Ok(streams) => streams,
             Err(e) => {
                 warn!("failed to enumerate PipeWire sources: {e}");

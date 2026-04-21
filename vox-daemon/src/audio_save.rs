@@ -20,14 +20,15 @@ pub fn save_wav(path: &Path, samples: &[f32]) -> Result<()> {
         sample_format: hound::SampleFormat::Int,
     };
 
-    let mut writer =
-        hound::WavWriter::create(path, spec).context("failed to create WAV file")?;
+    let mut writer = hound::WavWriter::create(path, spec).context("failed to create WAV file")?;
 
     for &s in samples {
         let clamped = s.clamp(-1.0, 1.0);
         #[allow(clippy::cast_possible_truncation)]
         let sample_i16 = (clamped * f32::from(i16::MAX)) as i16;
-        writer.write_sample(sample_i16).context("failed to write WAV sample")?;
+        writer
+            .write_sample(sample_i16)
+            .context("failed to write WAV sample")?;
     }
 
     writer.finalize().context("failed to finalize WAV file")?;

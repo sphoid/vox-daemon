@@ -29,7 +29,10 @@ pub fn render(session: &Session, options: &RenderOptions) -> Result<String, serd
         "duration_seconds".to_owned(),
         json!(session.duration_seconds),
     );
-    map.insert("speakers".to_owned(), serde_json::to_value(&session.speakers)?);
+    map.insert(
+        "speakers".to_owned(),
+        serde_json::to_value(&session.speakers)?,
+    );
 
     if options.include_transcript {
         map.insert(
@@ -49,7 +52,9 @@ pub fn render(session: &Session, options: &RenderOptions) -> Result<String, serd
 
 #[cfg(test)]
 mod tests {
-    use vox_core::session::{AudioRole, AudioSourceInfo, ConfigSnapshot, Session, TranscriptSegment};
+    use vox_core::session::{
+        AudioRole, AudioSourceInfo, ConfigSnapshot, Session, TranscriptSegment,
+    };
 
     use super::*;
 

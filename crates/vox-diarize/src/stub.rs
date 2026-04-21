@@ -21,10 +21,7 @@ impl StubDiarizer {
 }
 
 impl Diarizer for StubDiarizer {
-    fn diarize(
-        &self,
-        request: &DiarizationRequest<'_>,
-    ) -> Result<DiarizationResult, DiarizeError> {
+    fn diarize(&self, request: &DiarizationRequest<'_>) -> Result<DiarizationResult, DiarizeError> {
         Ok(DiarizationResult {
             segments: request.segments.to_vec(),
             speakers: vec![SpeakerMapping {

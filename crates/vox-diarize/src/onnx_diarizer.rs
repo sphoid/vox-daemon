@@ -22,7 +22,10 @@ impl OnnxDiarizer {
     /// Create a new diarizer from a loaded embedder and clustering threshold.
     #[must_use]
     pub fn new(embedder: OnnxEmbedder, threshold: f64) -> Self {
-        Self { embedder, threshold }
+        Self {
+            embedder,
+            threshold,
+        }
     }
 
     /// Create a diarizer by loading the ONNX model from `model_path`.
@@ -40,10 +43,7 @@ impl OnnxDiarizer {
 }
 
 impl Diarizer for OnnxDiarizer {
-    fn diarize(
-        &self,
-        request: &DiarizationRequest<'_>,
-    ) -> Result<DiarizationResult, DiarizeError> {
+    fn diarize(&self, request: &DiarizationRequest<'_>) -> Result<DiarizationResult, DiarizeError> {
         if request.segments.is_empty() {
             return Ok(DiarizationResult {
                 segments: Vec::new(),

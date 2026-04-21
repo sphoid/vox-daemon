@@ -289,9 +289,9 @@ impl Transcriber for WhisperTranscriber {
         let mut segments = Vec::with_capacity(usize::try_from(num_segments).unwrap_or(0));
 
         for i in 0..num_segments {
-            let seg = state.get_segment(i).ok_or_else(|| {
-                TranscribeError::Inference(format!("segment {i} out of bounds"))
-            })?;
+            let seg = state
+                .get_segment(i)
+                .ok_or_else(|| TranscribeError::Inference(format!("segment {i} out of bounds")))?;
 
             let text = seg
                 .to_str()

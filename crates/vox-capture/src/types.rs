@@ -309,8 +309,14 @@ mod tests {
             media_class: Some("Audio/Source".to_owned()),
             suggested_role: None,
         };
-        assert!(!monitor.is_source(), "monitor node should not match is_source");
-        assert!(monitor.is_any_source(), "monitor should match is_any_source as fallback");
+        assert!(
+            !monitor.is_source(),
+            "monitor node should not match is_source"
+        );
+        assert!(
+            monitor.is_any_source(),
+            "monitor should match is_any_source as fallback"
+        );
         assert!(monitor.is_monitor_or_virtual());
     }
 
@@ -324,7 +330,10 @@ mod tests {
             media_class: Some("Audio/Source/Virtual".to_owned()),
             suggested_role: None,
         };
-        assert!(!virtual_src.is_source(), "virtual source should not match is_source");
+        assert!(
+            !virtual_src.is_source(),
+            "virtual source should not match is_source"
+        );
         assert!(virtual_src.is_monitor_or_virtual());
     }
 

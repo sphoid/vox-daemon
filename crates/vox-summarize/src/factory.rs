@@ -3,7 +3,9 @@
 
 use vox_core::config::SummarizationConfig;
 
-use crate::{client::OpenAiClient, error::SummarizeError, ollama::OllamaClient, traits::Summarizer};
+use crate::{
+    client::OpenAiClient, error::SummarizeError, ollama::OllamaClient, traits::Summarizer,
+};
 
 /// Create a [`Summarizer`] from the application configuration.
 ///

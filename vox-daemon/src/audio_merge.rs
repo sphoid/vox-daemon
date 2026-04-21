@@ -14,7 +14,11 @@ use vox_capture::AudioChunk;
 ///
 /// Returns an empty `Vec` if both inputs are empty.
 #[must_use]
-#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
 pub fn merge_chunks(mic: &[AudioChunk], app: &[AudioChunk]) -> Vec<f32> {
     let total_len = compute_total_length(mic.iter().chain(app.iter()));
     if total_len == 0 {
@@ -42,7 +46,11 @@ pub fn merge_chunks(mic: &[AudioChunk], app: &[AudioChunk]) -> Vec<f32> {
 }
 
 /// Compute the total output buffer length in samples from an iterator of chunks.
-#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
 fn compute_total_length<'a>(chunks: impl Iterator<Item = &'a AudioChunk>) -> usize {
     let mut max_end: f64 = 0.0;
     for chunk in chunks {

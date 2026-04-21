@@ -1,7 +1,7 @@
 //! Daemon mode — runs the background service listening for tray control commands.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use anyhow::Result;

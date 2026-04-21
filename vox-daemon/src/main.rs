@@ -185,8 +185,8 @@ fn list_sources() -> Result<()> {
 
     #[cfg(feature = "pw")]
     let streams = {
-        let mut source = vox_capture::pw::PipeWireSource::new(vec![])
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let mut source =
+            vox_capture::pw::PipeWireSource::new(vec![]).map_err(|e| anyhow::anyhow!("{e}"))?;
         source
             .list_streams(&StreamFilter::default())
             .map_err(|e| anyhow::anyhow!("{e}"))?
@@ -204,16 +204,10 @@ fn list_sources() -> Result<()> {
         return Ok(());
     }
 
-    println!(
-        "{:<8} {:<40} {:<16} {}",
-        "Node ID", "Name", "Class", "App"
-    );
+    println!("{:<8} {:<40} {:<16} {}", "Node ID", "Name", "Class", "App");
     println!("{}", "-".repeat(85));
     for stream in &streams {
-        let display_name = stream
-            .description
-            .as_deref()
-            .unwrap_or(&stream.name);
+        let display_name = stream.description.as_deref().unwrap_or(&stream.name);
         println!(
             "{:<8} {:<40} {:<16} {}",
             stream.node_id,

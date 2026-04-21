@@ -216,7 +216,10 @@ pub fn download_model(size: ModelSize, dest: &Path) -> Result<(), TranscribeErro
             "download size known"
         );
     } else {
-        warn!(model = size.file_name(), "Content-Length header absent; cannot report total size");
+        warn!(
+            model = size.file_name(),
+            "Content-Length header absent; cannot report total size"
+        );
     }
 
     // Write to a temporary file in the same directory so the rename is atomic.
@@ -456,7 +459,10 @@ mod tests {
 
         // No .bin.tmp artefact should be present.
         let tmp = dir.path().join("ggml-tiny.bin.tmp");
-        assert!(!tmp.exists(), ".bin.tmp should not exist after a clean resolve");
+        assert!(
+            !tmp.exists(),
+            ".bin.tmp should not exist after a clean resolve"
+        );
     }
 
     /// Verifies that `download_model` creates the cache directory when it
@@ -468,7 +474,12 @@ mod tests {
     fn test_download_model_creates_parent_directory() {
         let dir = tempfile::tempdir().expect("create tempdir");
         // Point to a deep nested path that doesn't exist yet.
-        let nested = dir.path().join("a").join("b").join("c").join("ggml-base.bin");
+        let nested = dir
+            .path()
+            .join("a")
+            .join("b")
+            .join("c")
+            .join("ggml-base.bin");
 
         // create_dir_all should succeed even for non-existent directories.
         let parent = nested.parent().expect("has parent");

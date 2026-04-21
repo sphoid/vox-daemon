@@ -166,23 +166,25 @@ impl OllamaClient {
         let body_text = response.text().await?;
         debug!(body_len = body_text.len(), "raw Ollama response body");
 
-        let chat_response: OllamaChatResponse = serde_json::from_str(&body_text)
-            .map_err(|e| {
-                warn!(
-                    error = %e,
-                    body_preview = &body_text[..body_text.len().min(500)],
-                    "failed to parse Ollama response"
-                );
-                SummarizeError::ParseError {
-                    reason: format!("failed to deserialize Ollama response: {e}"),
-                    raw: body_text.clone(),
-                }
-            })?;
+        let chat_response: OllamaChatResponse = serde_json::from_str(&body_text).map_err(|e| {
+            warn!(
+                error = %e,
+                body_preview = &body_text[..body_text.len().min(500)],
+                "failed to parse Ollama response"
+            );
+            SummarizeError::ParseError {
+                reason: format!("failed to deserialize Ollama response: {e}"),
+                raw: body_text.clone(),
+            }
+        })?;
 
         let content = chat_response.message.content;
 
         if content.is_empty() {
-            warn!(raw_body = &body_text[..body_text.len().min(500)], "Ollama returned empty content");
+            warn!(
+                raw_body = &body_text[..body_text.len().min(500)],
+                "Ollama returned empty content"
+            );
             return Err(SummarizeError::EmptyResponse);
         }
 
@@ -218,29 +220,25 @@ mod tests {
 
     #[test]
     fn test_endpoint_normalisation_trailing_slash() {
-        let client =
-            OllamaClient::new("http://localhost:11434/", "llama3").expect("build client");
+        let client = OllamaClient::new("http://localhost:11434/", "llama3").expect("build client");
         assert_eq!(client.endpoint, "http://localhost:11434/api/chat");
     }
 
     #[test]
     fn test_endpoint_normalisation_no_slash() {
-        let client =
-            OllamaClient::new("http://localhost:11434", "llama3").expect("build client");
+        let client = OllamaClient::new("http://localhost:11434", "llama3").expect("build client");
         assert_eq!(client.endpoint, "http://localhost:11434/api/chat");
     }
 
     #[test]
     fn test_client_stores_model() {
-        let client =
-            OllamaClient::new("http://localhost:11434", "my-model").expect("build client");
+        let client = OllamaClient::new("http://localhost:11434", "my-model").expect("build client");
         assert_eq!(client.model, "my-model");
     }
 
     #[tokio::test]
     async fn test_summarize_empty_transcript_returns_error() {
-        let client =
-            OllamaClient::new("http://localhost:11434", "llama3").expect("build client");
+        let client = OllamaClient::new("http://localhost:11434", "llama3").expect("build client");
         let result = client.summarize(&[]).await;
         assert!(matches!(result, Err(SummarizeError::EmptyTranscript)));
     }

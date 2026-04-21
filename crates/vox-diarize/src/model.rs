@@ -81,9 +81,8 @@ fn download_model(url: &str, dest: &Path) -> Result<(), DiarizeError> {
 
     let tmp_path = dest.with_extension("onnx.tmp");
 
-    let response = reqwest::blocking::get(url).map_err(|e| {
-        DiarizeError::ModelDownload(format!("HTTP request failed: {e}"))
-    })?;
+    let response = reqwest::blocking::get(url)
+        .map_err(|e| DiarizeError::ModelDownload(format!("HTTP request failed: {e}")))?;
 
     if !response.status().is_success() {
         return Err(DiarizeError::ModelDownload(format!(
@@ -92,9 +91,9 @@ fn download_model(url: &str, dest: &Path) -> Result<(), DiarizeError> {
         )));
     }
 
-    let bytes = response.bytes().map_err(|e| {
-        DiarizeError::ModelDownload(format!("failed to read response body: {e}"))
-    })?;
+    let bytes = response
+        .bytes()
+        .map_err(|e| DiarizeError::ModelDownload(format!("failed to read response body: {e}")))?;
 
     std::fs::write(&tmp_path, &bytes).map_err(|e| {
         DiarizeError::ModelDownload(format!(

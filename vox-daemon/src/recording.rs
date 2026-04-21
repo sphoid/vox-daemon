@@ -1,7 +1,7 @@
 //! Recording session management — captures audio, transcribes, and saves results.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -231,12 +231,8 @@ fn select_capture_targets(
 ) -> Result<Vec<(u32, StreamRole)>> {
     use vox_capture::StreamFilter;
 
-    let mic_setting = mic_override
-        .as_deref()
-        .unwrap_or(&config.audio.mic_source);
-    let app_setting = app_override
-        .as_deref()
-        .unwrap_or(&config.audio.app_source);
+    let mic_setting = mic_override.as_deref().unwrap_or(&config.audio.mic_source);
+    let app_setting = app_override.as_deref().unwrap_or(&config.audio.app_source);
 
     let all_streams = vox_capture::PipeWireSource::enumerate_streams(&StreamFilter::default())
         .map_err(|e| anyhow::anyhow!("failed to enumerate PipeWire sources: {e}"))?;
@@ -285,11 +281,7 @@ fn select_capture_targets(
 /// `is_mic` selects whether we look for source nodes (mic) or sink/stream
 /// nodes (app audio) when auto-detecting.
 #[cfg(feature = "pw")]
-fn resolve_source(
-    setting: &str,
-    streams: &[vox_capture::StreamInfo],
-    is_mic: bool,
-) -> Option<u32> {
+fn resolve_source(setting: &str, streams: &[vox_capture::StreamInfo], is_mic: bool) -> Option<u32> {
     if setting == "auto" || setting.is_empty() {
         // Auto-detect: pick the first node matching the role.
         if is_mic {
@@ -316,11 +308,9 @@ fn resolve_source(
                 .iter()
                 .find(|s| s.is_app_sink())
                 .or_else(|| {
-                    streams.iter().find(|s| {
-                        s.media_class
-                            .as_deref()
-                            .is_some_and(|c| c.contains("Sink"))
-                    })
+                    streams
+                        .iter()
+                        .find(|s| s.media_class.as_deref().is_some_and(|c| c.contains("Sink")))
                 })
                 .map(|s| s.node_id)
         }
@@ -424,7 +414,11 @@ fn transcribe_audio(
 
 /// Run ONNX-based speaker diarization on the transcribed segments.
 #[cfg(feature = "diarize")]
-#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
 fn run_diarization(
     config: &AppConfig,
     session: &mut Session,
@@ -433,8 +427,9 @@ fn run_diarization(
 ) -> Result<()> {
     tracing::info!("running speaker diarization...");
 
-    let model_path = vox_diarize::model::resolve_model_path(&config.transcription.diarize_model_path)
-        .map_err(|e| anyhow::anyhow!("diarization model error: {e}"))?;
+    let model_path =
+        vox_diarize::model::resolve_model_path(&config.transcription.diarize_model_path)
+            .map_err(|e| anyhow::anyhow!("diarization model error: {e}"))?;
 
     let diarizer = vox_diarize::OnnxDiarizer::from_model_path(
         &model_path,
@@ -608,5 +603,3 @@ pub fn reprocess_session(config: &AppConfig, session_id: &str) -> Result<()> {
 
     Ok(())
 }
-
-

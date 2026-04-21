@@ -99,7 +99,6 @@ pub fn agglomerative_cluster(embeddings: &[Vec<f32>], threshold: f64) -> Vec<usi
                 *label = keep;
             }
         }
-
     }
 
     let _ = next_label;
@@ -158,18 +157,11 @@ fn compute_centroid(labels: &[usize], embeddings: &[Vec<f32>], cluster_id: usize
     }
 
     #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
-    sum.into_iter()
-        .map(|s| (s / count as f64) as f32)
-        .collect()
+    sum.into_iter().map(|s| (s / count as f64) as f32).collect()
 }
 
 /// Average linkage distance between two clusters.
-fn average_linkage_distance(
-    labels: &[usize],
-    dist: &[Vec<f64>],
-    c_i: usize,
-    c_j: usize,
-) -> f64 {
+fn average_linkage_distance(labels: &[usize], dist: &[Vec<f64>], c_i: usize, c_j: usize) -> f64 {
     let mut total = 0.0;
     let mut count = 0_usize;
 
@@ -222,7 +214,10 @@ mod tests {
         let a = vec![1.0, 0.0, 0.0];
         let b = vec![1.0, 0.0, 0.0];
         let d = cosine_distance(&a, &b);
-        assert!(d.abs() < 1e-6, "identical vectors should have distance ~0, got {d}");
+        assert!(
+            d.abs() < 1e-6,
+            "identical vectors should have distance ~0, got {d}"
+        );
     }
 
     #[test]
@@ -230,7 +225,10 @@ mod tests {
         let a = vec![1.0, 0.0];
         let b = vec![0.0, 1.0];
         let d = cosine_distance(&a, &b);
-        assert!((d - 1.0).abs() < 1e-6, "orthogonal vectors should have distance ~1, got {d}");
+        assert!(
+            (d - 1.0).abs() < 1e-6,
+            "orthogonal vectors should have distance ~1, got {d}"
+        );
     }
 
     #[test]
@@ -238,7 +236,10 @@ mod tests {
         let a = vec![1.0, 0.0];
         let b = vec![-1.0, 0.0];
         let d = cosine_distance(&a, &b);
-        assert!((d - 2.0).abs() < 1e-6, "opposite vectors should have distance ~2, got {d}");
+        assert!(
+            (d - 2.0).abs() < 1e-6,
+            "opposite vectors should have distance ~2, got {d}"
+        );
     }
 
     #[test]
@@ -294,10 +295,7 @@ mod tests {
 
     #[test]
     fn identify_speaker_matches_closest() {
-        let embeddings = vec![
-            vec![1.0, 0.0],
-            vec![0.0, 1.0],
-        ];
+        let embeddings = vec![vec![1.0, 0.0], vec![0.0, 1.0]];
         let labels = vec![0, 1];
         let enrollment = vec![0.9, 0.1]; // closer to cluster 0
         let result = identify_speaker(&labels, &embeddings, &enrollment);

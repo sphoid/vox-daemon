@@ -29,7 +29,10 @@ impl OnnxEmbedder {
     #[instrument(skip_all, fields(model_path = %model_path.as_ref().display()))]
     pub fn new(model_path: impl AsRef<Path>) -> Result<Self, DiarizeError> {
         let model_path = model_path.as_ref();
-        info!("loading ONNX speaker embedding model from {}", model_path.display());
+        info!(
+            "loading ONNX speaker embedding model from {}",
+            model_path.display()
+        );
 
         let session = ort::Session::builder()
             .map_err(|e| DiarizeError::ModelLoad(format!("failed to create session builder: {e}")))?
@@ -61,11 +64,9 @@ impl OnnxEmbedder {
         let shape = vec![1_usize, input_data.len()];
 
         let input_tensor = ort::value::Value::from_array(
-            ndarray::Array::from_shape_vec(
-                ndarray::IxDyn(&shape),
-                input_data,
-            )
-            .map_err(|e| DiarizeError::Inference(format!("failed to create input array: {e}")))?,
+            ndarray::Array::from_shape_vec(ndarray::IxDyn(&shape), input_data).map_err(|e| {
+                DiarizeError::Inference(format!("failed to create input array: {e}"))
+            })?,
         )
         .map_err(|e| DiarizeError::Inference(format!("failed to create input tensor: {e}")))?;
 
@@ -77,16 +78,19 @@ impl OnnxEmbedder {
             .map_err(|e| DiarizeError::Inference(format!("ONNX inference failed: {e}")))?;
 
         // The output is typically shape [1, embedding_dim].
-        let output = outputs
-            .first()
-            .ok_or_else(|| DiarizeError::Inference("no output tensor from ONNX model".to_owned()))?;
+        let output = outputs.first().ok_or_else(|| {
+            DiarizeError::Inference("no output tensor from ONNX model".to_owned())
+        })?;
 
-        let output_tensor = output.1
-            .try_extract_tensor::<f32>()
-            .map_err(|e| DiarizeError::Inference(format!("failed to extract output tensor: {e}")))?;
+        let output_tensor = output.1.try_extract_tensor::<f32>().map_err(|e| {
+            DiarizeError::Inference(format!("failed to extract output tensor: {e}"))
+        })?;
 
         let embedding: Vec<f32> = output_tensor.iter().copied().collect();
-        debug!(embedding_dim = embedding.len(), "extracted speaker embedding");
+        debug!(
+            embedding_dim = embedding.len(),
+            "extracted speaker embedding"
+        );
 
         Ok(embedding)
     }
@@ -102,7 +106,11 @@ impl OnnxEmbedder {
     /// # Errors
     ///
     /// Returns [`DiarizeError::Inference`] if any embedding extraction fails.
-    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
     pub fn extract_all(
         &self,
         segments: &[vox_core::session::TranscriptSegment],
@@ -116,8 +124,7 @@ impl OnnxEmbedder {
             if duration < MIN_SEGMENT_DURATION_SECS {
                 debug!(
                     segment = i,
-                    duration,
-                    "skipping short segment for embedding"
+                    duration, "skipping short segment for embedding"
                 );
                 continue;
             }
