@@ -181,7 +181,35 @@ impl WorkspaceSocket {
             .await
             .map_err(|_| ExportError::Transport(format!("{event} ack timeout")))?
             .map_err(|_| ExportError::Transport(format!("{event} ack channel dropped")))?;
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            let shape = ack_debug_shape(&ack);
+            debug!(event, ack_shape = %shape, "ack received");
+        }
         Ok(ack)
+    }
+}
+
+/// Summarise the ack JSON for diagnostic logs without dumping huge base64
+/// blobs into the terminal.
+fn ack_debug_shape(ack: &Value) -> String {
+    match ack {
+        Value::Null => "null".to_owned(),
+        Value::Object(map) => {
+            let keys: Vec<String> = map
+                .iter()
+                .map(|(k, v)| match v {
+                    Value::Object(inner) => {
+                        let inner_keys: Vec<&str> = inner.keys().map(String::as_str).collect();
+                        format!("{k}: {{ {} }}", inner_keys.join(", "))
+                    }
+                    Value::String(s) if s.len() > 40 => format!("{k}: <string len={}>", s.len()),
+                    other => format!("{k}: {other}"),
+                })
+                .collect();
+            format!("{{ {} }}", keys.join(", "))
+        }
+        Value::Array(a) => format!("array len={}", a.len()),
+        other => other.to_string(),
     }
 }
 

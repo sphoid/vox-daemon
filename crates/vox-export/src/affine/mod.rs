@@ -42,10 +42,11 @@ use crate::{
     traits::{ExportRequest, ExportResult, ExportTarget, Folder, Workspace},
 };
 
-/// Per-workspace timeout for the realtime name fetch.  Keeps a single slow
-/// workspace from blocking the rest of the list; callers fall back to the
-/// short-id placeholder on timeout.
-const WORKSPACE_NAME_FETCH_TIMEOUT: Duration = Duration::from_secs(5);
+/// Per-workspace timeout for the realtime name fetch.  Covers the full
+/// connect + join + load-doc round-trip.  Keeps a single slow workspace
+/// from blocking the rest of the list; callers fall back to the short-id
+/// placeholder on timeout.
+const WORKSPACE_NAME_FETCH_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// `AFFiNE` export target.
 pub struct AffineTarget {
@@ -282,14 +283,51 @@ async fn fetch_workspace_name(
     headers: &AuthHeaders,
     workspace_id: &str,
 ) -> Result<Option<String>, ExportError> {
+    let overall = std::time::Instant::now();
+
+    let step = std::time::Instant::now();
     let client = socket::WorkspaceSocket::connect(ws_url, headers).await?;
+    debug!(
+        workspace_id,
+        elapsed_ms = u64::try_from(step.elapsed().as_millis()).unwrap_or(u64::MAX),
+        "workspace-name: connected"
+    );
+
+    let step = std::time::Instant::now();
     client.join(workspace_id).await?;
+    debug!(
+        workspace_id,
+        elapsed_ms = u64::try_from(step.elapsed().as_millis()).unwrap_or(u64::MAX),
+        "workspace-name: joined"
+    );
+
+    let step = std::time::Instant::now();
     let bytes = client.load_doc(workspace_id, workspace_id).await?;
+    debug!(
+        workspace_id,
+        elapsed_ms = u64::try_from(step.elapsed().as_millis()).unwrap_or(u64::MAX),
+        bytes = bytes.as_ref().map_or(0, Vec::len),
+        "workspace-name: load-doc returned"
+    );
+
     client.disconnect().await;
+
     let Some(bytes) = bytes else {
+        debug!(
+            workspace_id,
+            total_ms = u64::try_from(overall.elapsed().as_millis()).unwrap_or(u64::MAX),
+            "workspace-name: no bytes returned"
+        );
         return Ok(None);
     };
-    Ok(ydoc::extract_workspace_name(&bytes))
+    let name = ydoc::extract_workspace_name(&bytes);
+    debug!(
+        workspace_id,
+        total_ms = u64::try_from(overall.elapsed().as_millis()).unwrap_or(u64::MAX),
+        resolved = name.is_some(),
+        "workspace-name: finished"
+    );
+    Ok(name)
 }
 
 #[cfg(test)]

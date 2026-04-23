@@ -181,24 +181,52 @@ pub fn build_workspace_meta_append(doc_id: &str, title: &str) -> Vec<u8> {
 /// [`super::graphql::fallback_workspace_name`]).
 #[must_use]
 pub fn extract_workspace_name(update_bytes: &[u8]) -> Option<String> {
-    let update = yrs::Update::decode_v1(update_bytes).ok()?;
+    let update = match yrs::Update::decode_v1(update_bytes) {
+        Ok(u) => u,
+        Err(e) => {
+            tracing::debug!(error = %e, bytes = update_bytes.len(),
+                "workspace-name: failed to decode yjs update v1");
+            return None;
+        }
+    };
     let doc = Doc::new();
     {
         let mut txn = doc.transact_mut();
-        txn.apply_update(update).ok()?;
+        if let Err(e) = txn.apply_update(update) {
+            tracing::debug!(error = %e, "workspace-name: failed to apply yjs update");
+            return None;
+        }
     }
     let meta = doc.get_or_insert_map("meta");
     let txn = doc.transact();
+
+    // Log every top-level key in `meta` so that if `name` is absent in the
+    // real-world payload (newer AFFiNE schema?) we have breadcrumbs.
+    if tracing::enabled!(tracing::Level::DEBUG) {
+        let keys: Vec<String> = meta.iter(&txn).map(|(k, _)| k.to_owned()).collect();
+        tracing::debug!(keys = ?keys, "workspace-name: meta map keys");
+    }
+
     match meta.get(&txn, "name") {
         Some(Out::Any(Any::String(s))) => {
             let owned = s.to_string();
+            tracing::debug!(name = %owned, "workspace-name: read Any::String from meta.name");
             if owned.is_empty() { None } else { Some(owned) }
         }
         Some(Out::YText(text)) => {
             let owned = text.get_string(&txn);
+            tracing::debug!(name = %owned, "workspace-name: read Y.Text from meta.name");
             if owned.is_empty() { None } else { Some(owned) }
         }
-        _ => None,
+        Some(other) => {
+            tracing::debug!(kind = ?std::mem::discriminant(&other),
+                "workspace-name: meta.name present but not a string/text");
+            None
+        }
+        None => {
+            tracing::debug!("workspace-name: meta.name missing");
+            None
+        }
     }
 }
 
