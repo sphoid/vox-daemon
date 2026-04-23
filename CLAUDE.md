@@ -25,6 +25,7 @@ vox-daemon/
 │   ├── vox-transcribe/     # Whisper speech-to-text integration
 │   ├── vox-diarize/        # Speaker diarization (ONNX speaker embeddings + clustering)
 │   ├── vox-summarize/      # LLM client (built-in, Ollama, OpenAI-compatible)
+│   ├── vox-export/         # Plugin-based exporter (AFFiNE, future targets)
 │   ├── vox-storage/        # JSON session storage, Markdown export
 │   ├── vox-gui/            # iced settings window + transcript browser
 │   ├── vox-tray/           # System tray icon + popup menu
