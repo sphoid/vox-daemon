@@ -43,11 +43,16 @@ pub fn render_with_options(session: &Session, options: &RenderOptions) -> String
     let mut out = String::with_capacity(4096);
 
     render_header(session, &mut out);
-    if options.include_transcript {
-        render_transcript(session, &mut out);
-    }
+
+    let summary_written = options.include_summary && session.summary.is_some();
     if options.include_summary {
         render_summary(session, &mut out);
+    }
+    if options.include_transcript {
+        if summary_written {
+            out.push_str("---\n\n");
+        }
+        render_transcript(session, &mut out);
     }
 
     out
@@ -102,7 +107,7 @@ fn render_summary(session: &Session, out: &mut String) {
         return;
     };
 
-    out.push_str("---\n\n## Summary\n\n");
+    out.push_str("## Summary\n\n");
     out.push_str(&summary.overview);
     out.push_str("\n\n");
 
@@ -406,6 +411,37 @@ mod tests {
         assert!(md.contains("- [ ] Book venue"));
         assert!(md.contains("### Decisions"));
         assert!(md.contains("- Use Rust for the backend."));
+    }
+
+    #[test]
+    fn test_render_summary_above_transcript() {
+        let mut session = base_session();
+        session.transcript = vec![TranscriptSegment {
+            start_time: 0.0,
+            end_time: 5.0,
+            speaker: "You".to_owned(),
+            text: "Transcript body.".to_owned(),
+        }];
+        session.summary = Some(Summary {
+            generated_at: Utc::now(),
+            backend: "ollama".to_owned(),
+            model: "qwen2.5:1.5b".to_owned(),
+            overview: "Summary body.".to_owned(),
+            key_points: vec![],
+            action_items: vec![],
+            decisions: vec![],
+        });
+
+        let md = render(&session);
+        let summary_pos = md.find("## Summary").expect("summary heading");
+        let transcript_pos = md.find("## Transcript").expect("transcript heading");
+        assert!(
+            summary_pos < transcript_pos,
+            "summary should appear above transcript: {md}"
+        );
+        // Divider between summary and transcript is present exactly once after
+        // the header divider.
+        assert_eq!(md.matches("\n---\n\n").count(), 2);
     }
 
     #[test]
