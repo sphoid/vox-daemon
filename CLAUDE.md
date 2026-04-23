@@ -4,7 +4,7 @@
 
 Vox Daemon is a Linux-native background service that captures video call audio via PipeWire, transcribes it with Whisper (GPU-accelerated), performs speaker diarization, and generates AI-powered post-call summaries. It is controlled from a system tray icon with a full settings window built in iced.
 
-**Language:** Rust (Edition 2024, stable 1.94.0+)
+**Language:** Rust (Edition 2024, stable 1.85.0+ MSRV)
 **Target Platform:** Linux only (Wayland-first, PipeWire-native)
 **Spec:** See `PRD.md` for the full product requirements document.
 
@@ -22,7 +22,8 @@ vox-daemon/
 ├── crates/
 │   ├── vox-core/           # Shared types, config, error handling, XDG paths
 │   ├── vox-capture/        # PipeWire audio capture
-│   ├── vox-transcribe/     # Whisper integration + diarization
+│   ├── vox-transcribe/     # Whisper speech-to-text integration
+│   ├── vox-diarize/        # Speaker diarization (ONNX speaker embeddings + clustering)
 │   ├── vox-summarize/      # LLM client (built-in, Ollama, OpenAI-compatible)
 │   ├── vox-storage/        # JSON session storage, Markdown export
 │   ├── vox-gui/            # iced settings window + transcript browser
@@ -74,7 +75,9 @@ vox-daemon/
 
 See `PRD.md` Section 10 for full details. Implement in this order:
 
-### Phase 1: Core Audio Pipeline (Current)
+All four phases below have been implemented (commit `50581f1` and subsequent iterations). The lists are retained as a historical roadmap.
+
+### Phase 1: Core Audio Pipeline
 1. Workspace setup with all crate stubs
 2. `vox-core`: Config, error types, XDG paths, shared types
 3. `vox-capture`: PipeWire connection, stream enumeration, audio capture
@@ -148,11 +151,18 @@ Each subagent should write a brief completion summary to a tracking file:
 |---------|-------|---------|
 | PipeWire | `pipewire` | 0.9.2 |
 | Whisper | `whisper-rs` | 0.15.1 |
-| GUI | `iced` | 0.14.0 |
-| System Tray | `tray-icon` | 0.21.2 |
+| ONNX Runtime (diarize) | `ort` | 2.0.0-rc.12 |
+| N-d arrays (diarize) | `ndarray` | 0.16 |
+| GUI | `iced` | 0.14 |
+| File dialog (GUI) | `rfd` | 0.15 |
+| System Tray | `tray-icon` | 0.21 |
+| Tray menu | `muda` | 0.17 |
+| Tray (Linux AppIndicator) | `gtk` | 0.18 (optional) |
 | Notifications | `notify-rust` | 4.11.6 |
 | HTTP Client | `reqwest` | 0.12.x |
 | Async Runtime | `tokio` | 1.x |
+| Async traits | `async-trait` | 0.1 |
+| WAV I/O | `hound` | 3.5 |
 | Serialization | `serde`, `serde_json`, `toml` | 1.x, 1.x, 0.8.x |
 | CLI | `clap` | 4.x |
 | Logging | `tracing`, `tracing-subscriber` | 0.1.x, 0.3.x |
