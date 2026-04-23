@@ -68,6 +68,8 @@ vox-daemon/
 
 - Use conventional commits: `feat:`, `fix:`, `refactor:`, `docs:`, `test:`, `chore:`.
 - One logical change per commit.
+- Always fork a new branch when starting new tasks - but commit tightly related follow up work to same branch
+- Always create a pull request when finished with a task with detailed description of what was done
 
 ---
 
@@ -78,6 +80,7 @@ See `PRD.md` Section 10 for full details. Implement in this order:
 All four phases below have been implemented (commit `50581f1` and subsequent iterations). The lists are retained as a historical roadmap.
 
 ### Phase 1: Core Audio Pipeline
+
 1. Workspace setup with all crate stubs
 2. `vox-core`: Config, error types, XDG paths, shared types
 3. `vox-capture`: PipeWire connection, stream enumeration, audio capture
@@ -87,6 +90,7 @@ All four phases below have been implemented (commit `50581f1` and subsequent ite
 7. Basic speaker separation (mic vs. app = "You" vs. "Remote")
 
 ### Phase 2: System Tray & UI
+
 8. `vox-tray`: System tray with start/stop/status
 9. `vox-gui`: Settings window (iced)
 10. `vox-gui`: Transcript browser (list, view, search)
@@ -94,12 +98,14 @@ All four phases below have been implemented (commit `50581f1` and subsequent ite
 12. `vox-storage`: Markdown export
 
 ### Phase 3: AI Summarization
+
 13. `vox-summarize`: LLM provider trait
 14. `vox-summarize`: Ollama / OpenAI-compatible HTTP client
 15. `vox-summarize`: Prompt engineering + structured output
 16. Integration: auto/manual summarization trigger
 
 ### Phase 4: Polish & Release
+
 17. CI/CD pipeline
 18. Packaging (AUR, .deb, Flatpak)
 19. Documentation, README, man page
@@ -114,18 +120,21 @@ This project uses specialist subagents for parallel development. The orchestrato
 ### When to Dispatch Subagents
 
 **Parallel dispatch** when tasks span independent crates or domains:
+
 - Audio capture work → `audio-specialist`
 - Whisper/LLM/diarization work → `ai-specialist`
 - GUI, tray, notifications → `gui-specialist`
 - Validation against PRD → `qa-reviewer`
 
 **Sequential dispatch** when tasks have dependencies:
+
 - Always run `qa-reviewer` AFTER an implementation agent completes a feature
 - Always run the implementing agent's fix cycle BEFORE moving to the next feature
 
 ### Dispatch Protocol
 
 When spawning a subagent, always provide:
+
 1. **Task scope:** Which crate(s) and file(s) to work on
 2. **PRD reference:** Which section/acceptance criteria apply
 3. **Context:** Any relevant decisions or constraints from prior work
@@ -134,6 +143,7 @@ When spawning a subagent, always provide:
 ### Output Tracking
 
 Each subagent should write a brief completion summary to a tracking file:
+
 - Implementation agents: append to `docs/progress.md` with what was implemented and any open questions
 - QA agent: append to `docs/qa-log.md` with pass/fail per acceptance criterion and any issues found
 
@@ -147,27 +157,27 @@ Each subagent should write a brief completion summary to a tracking file:
 
 ## Dependency Quick Reference
 
-| Purpose | Crate | Version |
-|---------|-------|---------|
-| PipeWire | `pipewire` | 0.9.2 |
-| Whisper | `whisper-rs` | 0.15.1 |
-| ONNX Runtime (diarize) | `ort` | 2.0.0-rc.12 |
-| N-d arrays (diarize) | `ndarray` | 0.16 |
-| GUI | `iced` | 0.14 |
-| File dialog (GUI) | `rfd` | 0.15 |
-| System Tray | `tray-icon` | 0.21 |
-| Tray menu | `muda` | 0.17 |
-| Tray (Linux AppIndicator) | `gtk` | 0.18 (optional) |
-| Notifications | `notify-rust` | 4.11.6 |
-| HTTP Client | `reqwest` | 0.12.x |
-| Async Runtime | `tokio` | 1.x |
-| Async traits | `async-trait` | 0.1 |
-| WAV I/O | `hound` | 3.5 |
-| Serialization | `serde`, `serde_json`, `toml` | 1.x, 1.x, 0.8.x |
-| CLI | `clap` | 4.x |
-| Logging | `tracing`, `tracing-subscriber` | 0.1.x, 0.3.x |
-| Channels | `crossbeam-channel` | 0.5.x |
-| XDG Dirs | `dirs` | 6.x |
-| Timestamps | `chrono` | 0.4.x |
-| Errors | `thiserror` (libs), `anyhow` (bin) | 2.x, 1.x |
-| UUIDs | `uuid` | 1.x |
+| Purpose                   | Crate                              | Version         |
+| ------------------------- | ---------------------------------- | --------------- |
+| PipeWire                  | `pipewire`                         | 0.9.2           |
+| Whisper                   | `whisper-rs`                       | 0.15.1          |
+| ONNX Runtime (diarize)    | `ort`                              | 2.0.0-rc.12     |
+| N-d arrays (diarize)      | `ndarray`                          | 0.16            |
+| GUI                       | `iced`                             | 0.14            |
+| File dialog (GUI)         | `rfd`                              | 0.15            |
+| System Tray               | `tray-icon`                        | 0.21            |
+| Tray menu                 | `muda`                             | 0.17            |
+| Tray (Linux AppIndicator) | `gtk`                              | 0.18 (optional) |
+| Notifications             | `notify-rust`                      | 4.11.6          |
+| HTTP Client               | `reqwest`                          | 0.12.x          |
+| Async Runtime             | `tokio`                            | 1.x             |
+| Async traits              | `async-trait`                      | 0.1             |
+| WAV I/O                   | `hound`                            | 3.5             |
+| Serialization             | `serde`, `serde_json`, `toml`      | 1.x, 1.x, 0.8.x |
+| CLI                       | `clap`                             | 4.x             |
+| Logging                   | `tracing`, `tracing-subscriber`    | 0.1.x, 0.3.x    |
+| Channels                  | `crossbeam-channel`                | 0.5.x           |
+| XDG Dirs                  | `dirs`                             | 6.x             |
+| Timestamps                | `chrono`                           | 0.4.x           |
+| Errors                    | `thiserror` (libs), `anyhow` (bin) | 2.x, 1.x        |
+| UUIDs                     | `uuid`                             | 1.x             |
