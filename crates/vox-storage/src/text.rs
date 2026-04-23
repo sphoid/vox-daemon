@@ -16,11 +16,11 @@ pub fn render(session: &Session, options: &RenderOptions) -> String {
     let mut out = String::with_capacity(4096);
 
     render_header(session, &mut out);
-    if options.include_transcript {
-        render_transcript(session, &mut out);
-    }
     if options.include_summary {
         render_summary(session, &mut out);
+    }
+    if options.include_transcript {
+        render_transcript(session, &mut out);
     }
 
     out
@@ -161,6 +161,34 @@ mod tests {
         let txt = render(&session, &RenderOptions::default());
         assert!(txt.contains("[00:10 - 00:20] You:"));
         assert!(txt.contains("Hello."));
+    }
+
+    #[test]
+    fn test_text_render_summary_above_transcript() {
+        let mut session = base_session();
+        session.transcript = vec![TranscriptSegment {
+            start_time: 0.0,
+            end_time: 5.0,
+            speaker: "You".to_owned(),
+            text: "Transcript body.".to_owned(),
+        }];
+        session.summary = Some(Summary {
+            generated_at: Utc::now(),
+            backend: "test".to_owned(),
+            model: "test".to_owned(),
+            overview: "Overview text.".to_owned(),
+            key_points: vec![],
+            action_items: vec![],
+            decisions: vec![],
+        });
+
+        let txt = render(&session, &RenderOptions::default());
+        let summary_pos = txt.find("Summary\n").expect("summary heading");
+        let transcript_pos = txt.find("Transcript\n").expect("transcript heading");
+        assert!(
+            summary_pos < transcript_pos,
+            "summary should appear above transcript: {txt}"
+        );
     }
 
     #[test]
