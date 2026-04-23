@@ -112,35 +112,42 @@ struct WorkspaceNode {
     id: String,
 }
 
-/// Fetch all workspaces visible to the authenticated user.
+/// Fetch the ids of all workspaces visible to the authenticated user.
+///
+/// The `AFFiNE` GraphQL schema intentionally does not expose workspace
+/// names — they live in each workspace's root Yjs doc. Callers that want
+/// human-readable names should follow up with a realtime fetch (see
+/// [`super::AffineTarget::list_workspaces`]).
 ///
 /// # Errors
 ///
 /// Returns [`ExportError`] on transport failure or when the GraphQL server
 /// returns an error.
-pub async fn list_workspaces(
+pub async fn list_workspace_ids(
     http: &Client,
     base_url: &str,
     headers: &AuthHeaders,
-) -> Result<Vec<Workspace>, ExportError> {
+) -> Result<Vec<String>, ExportError> {
     let data: WorkspacesData =
         send::<(), _>(http, base_url, headers, WORKSPACES_QUERY, None).await?;
+    Ok(data.workspaces.into_iter().map(|w| w.id).collect())
+}
 
-    // `AFFiNE`'s `workspaces` query returns only ids for security; the display
-    // name lives inside the workspace's own Yjs doc and is not exposed via
-    // GraphQL. Use the short id as the display name so the picker is still
-    // usable.
-    Ok(data
-        .workspaces
-        .into_iter()
-        .map(|w| {
-            let short = w.id.chars().take(8).collect::<String>();
-            Workspace {
-                name: format!("Workspace {short}"),
-                id: w.id,
-            }
-        })
-        .collect())
+/// Short placeholder name for a workspace whose real name could not be
+/// resolved — e.g. the realtime fetch timed out or failed.
+#[must_use]
+pub fn fallback_workspace_name(id: &str) -> String {
+    let short: String = id.chars().take(8).collect();
+    format!("Workspace {short}")
+}
+
+/// Build a [`Workspace`] with a placeholder name derived from its id.
+#[must_use]
+pub fn workspace_with_fallback_name(id: String) -> Workspace {
+    Workspace {
+        name: fallback_workspace_name(&id),
+        id,
+    }
 }
 
 #[derive(Deserialize)]

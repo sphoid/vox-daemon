@@ -27,16 +27,25 @@ pub mod graphql;
 pub mod socket;
 pub mod ydoc;
 
+use std::time::Duration;
+
 use async_trait::async_trait;
 use base64::Engine as _;
 use reqwest::Client;
-use tracing::{debug, info, instrument};
+use tokio::task::JoinSet;
+use tracing::{debug, info, instrument, warn};
 use vox_core::config::AffineExportConfig;
 
+use self::auth::AuthHeaders;
 use crate::{
     error::ExportError,
     traits::{ExportRequest, ExportResult, ExportTarget, Folder, Workspace},
 };
+
+/// Per-workspace timeout for the realtime name fetch.  Keeps a single slow
+/// workspace from blocking the rest of the list; callers fall back to the
+/// short-id placeholder on timeout.
+const WORKSPACE_NAME_FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// `AFFiNE` export target.
 pub struct AffineTarget {
@@ -122,7 +131,51 @@ impl ExportTarget for AffineTarget {
     #[instrument(skip(self), fields(base_url = %self.base_url))]
     async fn list_workspaces(&self) -> Result<Vec<Workspace>, ExportError> {
         let headers = self.auth.ensure_headers(&self.http, &self.base_url).await?;
-        graphql::list_workspaces(&self.http, &self.base_url, &headers).await
+        let ids = graphql::list_workspace_ids(&self.http, &self.base_url, &headers).await?;
+
+        // `AFFiNE` does not expose workspace names via GraphQL — they live in
+        // each workspace's root Yjs doc under `meta.name`. Fan out the
+        // realtime fetches so the picker doesn't stall on a slow workspace;
+        // individual failures / timeouts fall back to the short-id name.
+        let ws_url = self.ws_url();
+        let mut set: JoinSet<Workspace> = JoinSet::new();
+        for id in ids {
+            let ws_url = ws_url.clone();
+            let headers = headers.clone();
+            set.spawn(async move {
+                let name = tokio::time::timeout(
+                    WORKSPACE_NAME_FETCH_TIMEOUT,
+                    fetch_workspace_name(&ws_url, &headers, &id),
+                )
+                .await;
+
+                let resolved = match name {
+                    Ok(Ok(Some(n))) => n,
+                    Ok(Ok(None)) => graphql::fallback_workspace_name(&id),
+                    Ok(Err(e)) => {
+                        warn!(workspace = %id, error = %e,
+                            "realtime workspace-name fetch failed; using id");
+                        graphql::fallback_workspace_name(&id)
+                    }
+                    Err(_) => {
+                        warn!(workspace = %id, "workspace-name fetch timed out; using id");
+                        graphql::fallback_workspace_name(&id)
+                    }
+                };
+                Workspace { id, name: resolved }
+            });
+        }
+
+        let mut workspaces = Vec::new();
+        while let Some(joined) = set.join_next().await {
+            match joined {
+                Ok(ws) => workspaces.push(ws),
+                Err(e) => warn!(error = %e, "workspace-name task panicked"),
+            }
+        }
+        // Sort by display name so the picker order is stable across calls.
+        workspaces.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(workspaces)
     }
 
     #[instrument(skip(self))]
@@ -219,6 +272,24 @@ impl ExportTarget for AffineTarget {
 
 fn encode(bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+/// Open a short-lived Socket.IO connection, load the workspace's root Yjs
+/// doc, and extract `meta.name`.  Returns `Ok(None)` when the doc exists
+/// but has no name set (e.g. fresh workspace).
+async fn fetch_workspace_name(
+    ws_url: &str,
+    headers: &AuthHeaders,
+    workspace_id: &str,
+) -> Result<Option<String>, ExportError> {
+    let client = socket::WorkspaceSocket::connect(ws_url, headers).await?;
+    client.join(workspace_id).await?;
+    let bytes = client.load_doc(workspace_id, workspace_id).await?;
+    client.disconnect().await;
+    let Some(bytes) = bytes else {
+        return Ok(None);
+    };
+    Ok(ydoc::extract_workspace_name(&bytes))
 }
 
 #[cfg(test)]

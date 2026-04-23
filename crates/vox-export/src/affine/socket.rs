@@ -5,6 +5,7 @@
 
 use std::time::Duration;
 
+use base64::Engine as _;
 use rust_socketio::{
     Payload,
     asynchronous::{Client as SioClient, ClientBuilder},
@@ -62,8 +63,8 @@ impl WorkspaceSocket {
             "spaceId": workspace_id,
             "clientVersion": CLIENT_VERSION,
         });
-        self.emit_with_ack("space:join", payload).await?;
-        Ok(())
+        let ack = self.emit_with_ack("space:join", payload).await?;
+        check_ack_error("space:join", &ack)
     }
 
     /// Emit `space:push-doc-update` with a base64-encoded Yjs update.
@@ -83,8 +84,57 @@ impl WorkspaceSocket {
             "docId": doc_id,
             "update": update_base64,
         });
-        self.emit_with_ack("space:push-doc-update", payload).await?;
-        Ok(())
+        let ack = self.emit_with_ack("space:push-doc-update", payload).await?;
+        check_ack_error("space:push-doc-update", &ack)
+    }
+
+    /// Emit `space:load-doc` and decode the server's Yjs update payload.
+    ///
+    /// Returns `Ok(None)` when the doc does not yet exist (server replies
+    /// with `error.name = "DOC_NOT_FOUND"`) — that is a valid response for a
+    /// fresh workspace whose root doc has never been persisted.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ExportError::Transport`] on any other server error or
+    /// [`ExportError::ParseError`] if the base64 payload is malformed.
+    pub async fn load_doc(
+        &self,
+        workspace_id: &str,
+        doc_id: &str,
+    ) -> Result<Option<Vec<u8>>, ExportError> {
+        let payload = json!({
+            "spaceType": "workspace",
+            "spaceId": workspace_id,
+            "docId": doc_id,
+        });
+        let ack = self.emit_with_ack("space:load-doc", payload).await?;
+
+        if let Some(err_obj) = ack.get("error") {
+            let name = err_obj.get("name").and_then(|n| n.as_str()).unwrap_or("");
+            if name == "DOC_NOT_FOUND" {
+                return Ok(None);
+            }
+            let msg = err_obj
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("unknown error");
+            return Err(ExportError::Transport(format!("space:load-doc: {msg}")));
+        }
+
+        let Some(b64) = ack
+            .get("data")
+            .and_then(|d| d.get("missing"))
+            .and_then(|v| v.as_str())
+        else {
+            return Ok(None);
+        };
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .map_err(|e| ExportError::ParseError {
+                reason: format!("space:load-doc base64 decode: {e}"),
+            })?;
+        Ok(Some(bytes))
     }
 
     /// Gracefully close the Socket.IO connection. Errors are logged and
@@ -131,14 +181,19 @@ impl WorkspaceSocket {
             .await
             .map_err(|_| ExportError::Transport(format!("{event} ack timeout")))?
             .map_err(|_| ExportError::Transport(format!("{event} ack channel dropped")))?;
-
-        if let Some(err_obj) = ack.get("error") {
-            let msg = err_obj
-                .get("message")
-                .and_then(|m| m.as_str())
-                .unwrap_or("unknown error");
-            return Err(ExportError::Transport(format!("{event}: {msg}")));
-        }
         Ok(ack)
     }
+}
+
+/// Treat the `error` field (if present) of an ack as a transport failure.
+/// Used by events that have no graceful "not found" path.
+fn check_ack_error(event: &'static str, ack: &Value) -> Result<(), ExportError> {
+    if let Some(err_obj) = ack.get("error") {
+        let msg = err_obj
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("unknown error");
+        return Err(ExportError::Transport(format!("{event}: {msg}")));
+    }
+    Ok(())
 }

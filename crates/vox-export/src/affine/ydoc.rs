@@ -14,7 +14,10 @@
 //! docs only appear in the sidebar once they are registered there — see
 //! [`build_workspace_meta_append`].
 
-use yrs::{Any, Array, ArrayPrelim, Doc, Map, MapPrelim, ReadTxn, Text, Transact, TransactionMut};
+use yrs::{
+    Any, Array, ArrayPrelim, Doc, GetString, Map, MapPrelim, Out, ReadTxn, Text, Transact,
+    TransactionMut, updates::decoder::Decode,
+};
 
 use crate::error::ExportError;
 
@@ -168,6 +171,37 @@ pub fn build_workspace_meta_append(doc_id: &str, title: &str) -> Vec<u8> {
     txn.encode_state_as_update_v1(&yrs::StateVector::default())
 }
 
+/// Extract the human-readable workspace name from a workspace root doc's
+/// Yjs v1 update bytes (as returned by `space:load-doc`).
+///
+/// `AFFiNE` stores the workspace name as a plain string under
+/// `meta.name`; newer clients store it as a `Y.Text`. Both shapes are
+/// handled. Returns `None` if the update cannot be decoded or the field is
+/// absent — callers should fall back to a placeholder (e.g.
+/// [`super::graphql::fallback_workspace_name`]).
+#[must_use]
+pub fn extract_workspace_name(update_bytes: &[u8]) -> Option<String> {
+    let update = yrs::Update::decode_v1(update_bytes).ok()?;
+    let doc = Doc::new();
+    {
+        let mut txn = doc.transact_mut();
+        txn.apply_update(update).ok()?;
+    }
+    let meta = doc.get_or_insert_map("meta");
+    let txn = doc.transact();
+    match meta.get(&txn, "name") {
+        Some(Out::Any(Any::String(s))) => {
+            let owned = s.to_string();
+            if owned.is_empty() { None } else { Some(owned) }
+        }
+        Some(Out::YText(text)) => {
+            let owned = text.get_string(&txn);
+            if owned.is_empty() { None } else { Some(owned) }
+        }
+        _ => None,
+    }
+}
+
 /// Build an `affine:embed-linked-doc` block appended to `parent_doc_id`'s
 /// content, pointing at `child_doc_id`.
 ///
@@ -232,6 +266,63 @@ mod tests {
     fn embed_linked_doc_is_non_empty() {
         let u = build_embed_linked_doc_block("parent", "child").expect("build");
         assert!(!u.is_empty());
+    }
+
+    #[test]
+    fn extract_workspace_name_reads_plain_string() {
+        // Build a synthetic workspace root doc with `meta.name` set as a
+        // plain string, encode it, then confirm extract_workspace_name
+        // reads it back.
+        let doc = Doc::new();
+        let meta = doc.get_or_insert_map("meta");
+        {
+            let mut txn = doc.transact_mut();
+            meta.insert(&mut txn, "name", "My Workspace");
+        }
+        let bytes = doc
+            .transact()
+            .encode_state_as_update_v1(&yrs::StateVector::default());
+
+        assert_eq!(
+            extract_workspace_name(&bytes).as_deref(),
+            Some("My Workspace")
+        );
+    }
+
+    #[test]
+    fn extract_workspace_name_reads_ytext_value() {
+        // Some AFFiNE clients store the name as a Y.Text instead of a plain
+        // string. Confirm we handle both.
+        let doc = Doc::new();
+        let meta = doc.get_or_insert_map("meta");
+        {
+            let mut txn = doc.transact_mut();
+            let text = meta.insert(&mut txn, "name", yrs::TextPrelim::new(""));
+            text.insert(&mut txn, 0, "Rich Name");
+        }
+        let bytes = doc
+            .transact()
+            .encode_state_as_update_v1(&yrs::StateVector::default());
+
+        assert_eq!(extract_workspace_name(&bytes).as_deref(), Some("Rich Name"));
+    }
+
+    #[test]
+    fn extract_workspace_name_absent_returns_none() {
+        // A doc with no `meta.name` at all.
+        let doc = Doc::new();
+        {
+            let _ = doc.get_or_insert_map("meta");
+        }
+        let bytes = doc
+            .transact()
+            .encode_state_as_update_v1(&yrs::StateVector::default());
+        assert!(extract_workspace_name(&bytes).is_none());
+    }
+
+    #[test]
+    fn extract_workspace_name_rejects_malformed_bytes() {
+        assert!(extract_workspace_name(b"not a yjs update").is_none());
     }
 
     #[test]
