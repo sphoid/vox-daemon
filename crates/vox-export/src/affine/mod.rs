@@ -27,11 +27,14 @@ pub mod graphql;
 pub mod socket;
 pub mod ydoc;
 
+use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use base64::Engine as _;
 use reqwest::Client;
+use tokio::sync::{Mutex as TokioMutex, MutexGuard};
 use tracing::{debug, info, instrument, warn};
 use vox_core::config::AffineExportConfig;
 
@@ -54,6 +57,16 @@ pub struct AffineTarget {
     http: Client,
     /// Authentication strategy.
     auth: auth::AuthState,
+    /// Lazily-connected Socket.IO client shared across all realtime
+    /// operations on this target.  Kept alive for the lifetime of the
+    /// `AffineTarget` so every call after the first pays no cold-start
+    /// cost (the first `space:join` on a fresh socket takes 20-45 s).
+    socket: Arc<TokioMutex<Option<socket::WorkspaceSocket>>>,
+    /// Folders (doc metadata) indexed by workspace id, populated as a
+    /// side-effect of [`Self::list_workspaces`] and consumed by
+    /// [`Self::list_folders`].  Both methods need the workspace root
+    /// doc; caching lets the folder picker render instantly.
+    folders_cache: Arc<TokioMutex<HashMap<String, Vec<Folder>>>>,
 }
 
 impl AffineTarget {
@@ -102,6 +115,8 @@ impl AffineTarget {
             base_url,
             http,
             auth,
+            socket: Arc::new(TokioMutex::new(None)),
+            folders_cache: Arc::new(TokioMutex::new(HashMap::new())),
         })
     }
 
@@ -115,7 +130,40 @@ impl AffineTarget {
             self.base_url.clone()
         }
     }
+
+    /// Acquire the shared Socket.IO client, opening a fresh connection on
+    /// first use.  Holding the returned guard serialises realtime ops,
+    /// which is required anyway — `AFFiNE` refuses concurrent emits from
+    /// the same user session.
+    ///
+    /// The `.as_ref().expect(…)` pattern at call-sites is safe: this
+    /// method installs `Some(…)` before returning.
+    async fn acquire_socket(
+        &self,
+    ) -> Result<MutexGuard<'_, Option<socket::WorkspaceSocket>>, ExportError> {
+        let mut guard = self.socket.lock().await;
+        if guard.is_none() {
+            let headers = self.auth.ensure_headers(&self.http, &self.base_url).await?;
+            let ws_url = self.ws_url();
+            let client = socket::WorkspaceSocket::connect(&ws_url, &headers).await?;
+            *guard = Some(client);
+        }
+        Ok(guard)
+    }
+
+    /// Forget the cached socket.  Next `acquire_socket` will reconnect.
+    /// Called on transport errors so a dead socket is not reused.
+    async fn reset_socket(&self) {
+        let mut guard = self.socket.lock().await;
+        if let Some(sock) = guard.take() {
+            sock.disconnect().await;
+        }
+    }
 }
+
+// No explicit Drop impl: when `AffineTarget` goes out of scope, the
+// `Arc<Mutex<Option<WorkspaceSocket>>>` drops, which drops the inner
+// `rust_socketio` client and closes the connection.
 
 #[async_trait]
 impl ExportTarget for AffineTarget {
@@ -132,16 +180,15 @@ impl ExportTarget for AffineTarget {
         let headers = self.auth.ensure_headers(&self.http, &self.base_url).await?;
         let ids = graphql::list_workspace_ids(&self.http, &self.base_url, &headers).await?;
 
-        // `AFFiNE` does not expose workspace names via GraphQL — they live
-        // in each workspace's root Yjs doc under `meta.name`.  We open a
-        // single Socket.IO connection and serially join each workspace,
-        // load its root doc, and leave.  Parallel fan-out was tried first
-        // but `AFFiNE` does not ack `space:join` when multiple fresh
-        // sockets race each other from the same user session.
-        let ws_url = self.ws_url();
+        // `AFFiNE` exposes neither workspace names nor doc titles via
+        // GraphQL — both live in each workspace's root Yjs doc.  Load
+        // that once per workspace on the shared socket: cache `meta.name`
+        // on the `Workspace` we return, and stash `meta.pages` in
+        // `folders_cache` so the subsequent `list_folders` call is
+        // instant.
         let mut workspaces = Vec::new();
-        let client = match socket::WorkspaceSocket::connect(&ws_url, &headers).await {
-            Ok(c) => c,
+        let guard = match self.acquire_socket().await {
+            Ok(g) => g,
             Err(e) => {
                 warn!(error = %e,
                     "failed to open socket for workspace-name lookup; using id placeholders");
@@ -152,69 +199,76 @@ impl ExportTarget for AffineTarget {
                 return Ok(workspaces);
             }
         };
+        let client = guard.as_ref().expect("acquire_socket returned Some");
 
-        // First pass.  The first `space:join` on a fresh socket takes
-        // 15–45s while the `AFFiNE` server cold-loads workspace state,
-        // which tends to eat whichever workspace goes first.  We track
-        // those so we can retry them once the socket is warm.
+        // First pass — the first `space:join` on a freshly-opened socket
+        // can take 20-45 s while the server cold-loads workspace state.
+        // Track anything that timed out or errored so we can retry once
+        // the socket is warm.
         let mut retry_ids = Vec::new();
         for id in &ids {
-            match resolve_workspace_name(&client, id).await {
+            match resolve_workspace_data(client, &self.folders_cache, id).await {
                 Ok(Some(name)) => workspaces.push(Workspace {
                     id: id.clone(),
                     name,
                 }),
                 Ok(None) => {
-                    // Doc loaded but carries no `meta.name` — no point
-                    // retrying; keep the placeholder.
                     workspaces.push(graphql::workspace_with_fallback_name(id.clone()));
                 }
                 Err(()) => retry_ids.push(id.clone()),
             }
         }
 
-        // Retry any that timed out / errored on the cold socket.  By now
-        // the socket is warm so these typically finish in milliseconds.
         for id in retry_ids {
-            let name = match resolve_workspace_name(&client, &id).await {
+            let name = match resolve_workspace_data(client, &self.folders_cache, &id).await {
                 Ok(Some(n)) => n,
                 Ok(None) | Err(()) => graphql::fallback_workspace_name(&id),
             };
             workspaces.push(Workspace { id, name });
         }
 
-        client.disconnect().await;
+        drop(guard);
         workspaces.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(workspaces)
     }
 
     #[instrument(skip(self))]
     async fn list_folders(&self, workspace_id: &str) -> Result<Vec<Folder>, ExportError> {
-        // `AFFiNE`'s GraphQL `workspace(id).docs` returns `title: null` on
-        // self-hosted instances — the real title lives in each doc's Yjs
-        // body, and the workspace's root doc mirrors a `{id, title}` map
-        // of all its pages under `meta.pages`.  Load that once instead of
-        // fanning out per-doc.
-        let headers = self.auth.ensure_headers(&self.http, &self.base_url).await?;
-        let ws_url = self.ws_url();
-        let client = socket::WorkspaceSocket::connect(&ws_url, &headers).await?;
-        client.join(workspace_id).await?;
-        let bytes = client.load_doc(workspace_id, workspace_id).await?;
-        let _ = client.leave(workspace_id).await;
-        client.disconnect().await;
+        // Fast path: `list_workspaces` already populated the cache while
+        // fetching the workspace's name.
+        if let Some(folders) = self.folders_cache.lock().await.get(workspace_id) {
+            debug!(
+                workspace_id,
+                count = folders.len(),
+                "list_folders: cache hit"
+            );
+            return Ok(folders.clone());
+        }
 
-        let Some(bytes) = bytes else {
-            return Ok(Vec::new());
+        // Slow path (e.g. user opens the picker without `list_workspaces`
+        // having been called first): fetch the workspace root doc on the
+        // shared socket and extract `meta.pages`.
+        let guard = self.acquire_socket().await?;
+        let client = guard.as_ref().expect("acquire_socket returned Some");
+        let bytes = match join_load_leave(client, workspace_id).await {
+            Ok(b) => b,
+            Err(e) => {
+                drop(guard);
+                // Reset so a dead socket is reopened next call.
+                self.reset_socket().await;
+                return Err(e);
+            }
         };
-        let pages = ydoc::extract_workspace_pages(&bytes);
-        let mut folders: Vec<Folder> = pages
-            .into_iter()
-            .map(|p| Folder {
-                id: p.id,
-                title: p.title.unwrap_or_else(|| "Untitled".to_owned()),
-            })
-            .collect();
-        folders.sort_by(|a, b| a.title.cmp(&b.title));
+        drop(guard);
+
+        let folders = match bytes {
+            Some(b) => pages_to_folders(ydoc::extract_workspace_pages(&b)),
+            None => Vec::new(),
+        };
+        self.folders_cache
+            .lock()
+            .await
+            .insert(workspace_id.to_owned(), folders.clone());
         Ok(folders)
     }
 
@@ -225,15 +279,12 @@ impl ExportTarget for AffineTarget {
         parent_id: Option<&str>,
         title: &str,
     ) -> Result<Folder, ExportError> {
-        let headers = self.auth.ensure_headers(&self.http, &self.base_url).await?;
-        let ws_url = self.ws_url();
         let doc_id = uuid::Uuid::new_v4().to_string();
-
-        // Build an empty-bodied doc so it shows up as a usable parent.
         let doc_update = ydoc::build_doc_update(&doc_id, title, "")?;
         let workspace_meta_update = ydoc::build_workspace_meta_append(&doc_id, title);
 
-        let client = socket::WorkspaceSocket::connect(&ws_url, &headers).await?;
+        let guard = self.acquire_socket().await?;
+        let client = guard.as_ref().expect("acquire_socket returned Some");
         client.join(workspace_id).await?;
         client
             .push_doc_update(workspace_id, &doc_id, &encode(&doc_update))
@@ -241,35 +292,41 @@ impl ExportTarget for AffineTarget {
         client
             .push_doc_update(workspace_id, workspace_id, &encode(&workspace_meta_update))
             .await?;
-
-        // Nest under an existing parent if requested.
         if let Some(parent) = parent_id {
             let embed_update = ydoc::build_embed_linked_doc_block(parent, &doc_id)?;
             client
                 .push_doc_update(workspace_id, parent, &encode(&embed_update))
                 .await?;
         }
+        let _ = client.leave(workspace_id).await;
+        drop(guard);
 
-        client.disconnect().await;
+        let folder = Folder {
+            id: doc_id.clone(),
+            title: title.to_owned(),
+        };
+        // Keep the cache consistent with what the user just created.
+        self.folders_cache
+            .lock()
+            .await
+            .entry(workspace_id.to_owned())
+            .or_default()
+            .push(folder.clone());
 
         info!(doc_id, title, "created affine folder doc");
-        Ok(Folder {
-            id: doc_id,
-            title: title.to_owned(),
-        })
+        Ok(folder)
     }
 
     #[instrument(skip(self, request), fields(title = %request.title))]
     async fn export(&self, request: ExportRequest<'_>) -> Result<ExportResult, ExportError> {
-        let headers = self.auth.ensure_headers(&self.http, &self.base_url).await?;
-        let ws_url = self.ws_url();
         let doc_id = uuid::Uuid::new_v4().to_string();
 
         debug!(doc_id, "building yjs update for new affine doc");
         let doc_update = ydoc::build_doc_update(&doc_id, &request.title, request.content_markdown)?;
         let workspace_meta_update = ydoc::build_workspace_meta_append(&doc_id, &request.title);
 
-        let client = socket::WorkspaceSocket::connect(&ws_url, &headers).await?;
+        let guard = self.acquire_socket().await?;
+        let client = guard.as_ref().expect("acquire_socket returned Some");
         client.join(&request.workspace_id).await?;
         client
             .push_doc_update(&request.workspace_id, &doc_id, &encode(&doc_update))
@@ -282,14 +339,15 @@ impl ExportTarget for AffineTarget {
             )
             .await?;
 
-        if let Some(parent) = request.parent_id {
-            let embed_update = ydoc::build_embed_linked_doc_block(&parent, &doc_id)?;
+        if let Some(parent) = &request.parent_id {
+            let embed_update = ydoc::build_embed_linked_doc_block(parent, &doc_id)?;
             client
-                .push_doc_update(&request.workspace_id, &parent, &encode(&embed_update))
+                .push_doc_update(&request.workspace_id, parent, &encode(&embed_update))
                 .await?;
         }
 
-        client.disconnect().await;
+        let _ = client.leave(&request.workspace_id).await;
+        drop(guard);
 
         let remote_url = Some(format!(
             "{}/workspace/{}/{}",
@@ -308,86 +366,89 @@ fn encode(bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
-/// Run one attempt at resolving a workspace's name.
+/// Load the workspace root doc once and populate both the returned name
+/// and the per-target folders cache.
 ///
 /// Return values:
-/// - `Ok(Some(name))`: name resolved successfully.
-/// - `Ok(None)`: the workspace's root doc loaded but has no `meta.name`.
-///   Retrying won't help — caller should keep the placeholder.
-/// - `Err(())`: timeout or transport error; caller may retry.
-async fn resolve_workspace_name(
+/// - `Ok(Some(name))`: name resolved successfully; folders cached.
+/// - `Ok(None)`: the root doc loaded but has no `meta.name` (retry
+///   won't help; caller keeps the placeholder).
+/// - `Err(())`: timeout or transport error; caller may retry on the now-
+///   warm socket.
+async fn resolve_workspace_data(
     client: &socket::WorkspaceSocket,
+    folders_cache: &TokioMutex<HashMap<String, Vec<Folder>>>,
     workspace_id: &str,
 ) -> Result<Option<String>, ()> {
     match tokio::time::timeout(
         WORKSPACE_NAME_FETCH_TIMEOUT,
-        fetch_workspace_name_on(client, workspace_id),
+        join_load_leave(client, workspace_id),
     )
     .await
     {
-        Ok(Ok(name)) => Ok(name),
+        Ok(Ok(Some(bytes))) => {
+            let name = ydoc::extract_workspace_name(&bytes);
+            let folders = pages_to_folders(ydoc::extract_workspace_pages(&bytes));
+            folders_cache
+                .lock()
+                .await
+                .insert(workspace_id.to_owned(), folders);
+            Ok(name)
+        }
+        Ok(Ok(None)) => {
+            // Doc exists but is empty — no name, no pages.
+            folders_cache
+                .lock()
+                .await
+                .insert(workspace_id.to_owned(), Vec::new());
+            Ok(None)
+        }
         Ok(Err(e)) => {
             warn!(workspace = %workspace_id, error = %e,
-                "realtime workspace-name fetch failed; will retry");
+                "realtime workspace fetch failed; will retry");
             Err(())
         }
         Err(_) => {
-            warn!(workspace = %workspace_id, "workspace-name fetch timed out; will retry");
+            warn!(workspace = %workspace_id, "workspace fetch timed out; will retry");
             Err(())
         }
     }
 }
 
-/// Join the workspace on a pre-opened socket, load its root Yjs doc,
-/// extract `meta.name`, then leave again so the socket is clean for the
-/// next workspace.
-///
-/// Returns `Ok(None)` when the doc exists but has no name set.
-async fn fetch_workspace_name_on(
+/// Join a workspace on a pre-opened socket, load its root Yjs doc, and
+/// leave. Returns `Ok(None)` if the server reports no existing state.
+async fn join_load_leave(
     client: &socket::WorkspaceSocket,
     workspace_id: &str,
-) -> Result<Option<String>, ExportError> {
+) -> Result<Option<Vec<u8>>, ExportError> {
     let overall = std::time::Instant::now();
-
-    let step = std::time::Instant::now();
     client.join(workspace_id).await?;
-    debug!(
-        workspace_id,
-        elapsed_ms = u64::try_from(step.elapsed().as_millis()).unwrap_or(u64::MAX),
-        "workspace-name: joined"
-    );
-
-    let step = std::time::Instant::now();
     let bytes = client.load_doc(workspace_id, workspace_id).await?;
-    debug!(
-        workspace_id,
-        elapsed_ms = u64::try_from(step.elapsed().as_millis()).unwrap_or(u64::MAX),
-        bytes = bytes.as_ref().map_or(0, Vec::len),
-        "workspace-name: load-doc returned"
-    );
-
-    // Leave so the server's per-space adapter binding is released before
-    // the next `join`. Errors here are non-fatal.
+    // Leave is best-effort: we don't want a leave failure to mask an
+    // otherwise-successful load.
     if let Err(e) = client.leave(workspace_id).await {
-        debug!(workspace_id, error = %e, "workspace-name: leave failed (non-fatal)");
+        debug!(workspace_id, error = %e, "workspace root: leave failed (non-fatal)");
     }
-
-    let Some(bytes) = bytes else {
-        debug!(
-            workspace_id,
-            total_ms = u64::try_from(overall.elapsed().as_millis()).unwrap_or(u64::MAX),
-            "workspace-name: no bytes returned"
-        );
-        return Ok(None);
-    };
-    let name = ydoc::extract_workspace_name(&bytes);
     debug!(
         workspace_id,
         total_ms = u64::try_from(overall.elapsed().as_millis()).unwrap_or(u64::MAX),
-        resolved = name.is_some(),
-        "workspace-name: finished"
+        bytes = bytes.as_ref().map_or(0, Vec::len),
+        "workspace root: fetched"
     );
-    Ok(name)
+    Ok(bytes)
+}
+
+/// Convert extracted `meta.pages` entries to sorted [`Folder`]s.
+fn pages_to_folders(pages: Vec<ydoc::WorkspacePage>) -> Vec<Folder> {
+    let mut folders: Vec<Folder> = pages
+        .into_iter()
+        .map(|p| Folder {
+            id: p.id,
+            title: p.title.unwrap_or_else(|| "Untitled".to_owned()),
+        })
+        .collect();
+    folders.sort_by(|a, b| a.title.cmp(&b.title));
+    folders
 }
 
 #[cfg(test)]

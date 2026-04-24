@@ -170,7 +170,11 @@ impl WorkspaceSocket {
 
     /// Gracefully close the Socket.IO connection. Errors are logged and
     /// swallowed — a failed disconnect should not mask a successful push.
-    pub async fn disconnect(self) {
+    ///
+    /// Takes `&self` so a pooled socket can be explicitly closed without
+    /// being moved out of its container; dropping the `WorkspaceSocket`
+    /// also closes the underlying `rust_socketio` client.
+    pub async fn disconnect(&self) {
         if let Err(e) = self.client.disconnect().await {
             debug!(error = %e, "socket disconnect failed");
         }
