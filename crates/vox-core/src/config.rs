@@ -29,6 +29,10 @@ pub struct AppConfig {
     /// Notification settings.
     #[serde(default)]
     pub notifications: NotificationConfig,
+
+    /// Third-party export target settings.
+    #[serde(default)]
+    pub export: ExportConfig,
 }
 
 impl AppConfig {
@@ -299,6 +303,84 @@ impl Default for NotificationConfig {
     }
 }
 
+/// Third-party export target settings.
+///
+/// Each field here corresponds to one [`vox-export`](../../../vox_export/index.html)
+/// plugin. Adding a new plugin is a matter of adding a new nested config
+/// struct + field here and a new arm in `vox_export::factory::build_targets`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ExportConfig {
+    /// `AFFiNE` (cloud or self-hosted) integration.
+    #[serde(default)]
+    pub affine: AffineExportConfig,
+}
+
+/// `AFFiNE` export integration settings.
+///
+/// Used by `vox_export::affine::AffineTarget`.
+///
+/// # Authentication
+///
+/// `AFFiNE` Cloud (`app.affine.pro`) blocks programmatic email/password
+/// sign-in via Cloudflare; cloud users must generate a personal access
+/// token under `Settings → Integrations → MCP Server` and paste it into
+/// `api_token`. Self-hosted instances additionally accept the
+/// `email` / `password` pair, which is exchanged for a session cookie on
+/// first use.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AffineExportConfig {
+    /// Whether the `AFFiNE` export target is enabled.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Base URL of the `AFFiNE` server (no trailing slash), e.g.
+    /// `https://app.affine.pro` or `https://affine.example.com`.
+    #[serde(default = "default_affine_base_url")]
+    pub base_url: String,
+
+    /// Personal access token (preferred; required for cloud).
+    ///
+    /// Stored in plaintext in `config.toml`; users should `chmod 600` the
+    /// file. Takes precedence over `email`/`password` when set.
+    #[serde(default)]
+    pub api_token: String,
+
+    /// Login email (self-hosted only).
+    #[serde(default)]
+    pub email: String,
+
+    /// Login password (self-hosted only). Stored in plaintext — see the note
+    /// on `api_token`.
+    #[serde(default)]
+    pub password: String,
+
+    /// Optional workspace id to pre-select in the Send-to picker.
+    #[serde(default)]
+    pub default_workspace_id: String,
+
+    /// Optional parent-doc id to pre-select in the Send-to picker.
+    #[serde(default)]
+    pub default_parent_id: String,
+}
+
+impl Default for AffineExportConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            base_url: default_affine_base_url(),
+            api_token: String::new(),
+            email: String::new(),
+            password: String::new(),
+            default_workspace_id: String::new(),
+            default_parent_id: String::new(),
+        }
+    }
+}
+
+fn default_affine_base_url() -> String {
+    "https://app.affine.pro".to_owned()
+}
+
 fn default_auto() -> String {
     "auto".to_owned()
 }
@@ -401,6 +483,28 @@ mic_source = "alsa_input.usb"
         // This test works because the test environment has no XDG config dir set up
         let config = AppConfig::load().expect("should return default");
         assert_eq!(config, AppConfig::default());
+    }
+
+    #[test]
+    fn test_export_config_defaults_to_disabled() {
+        let config = AppConfig::default();
+        assert!(!config.export.affine.enabled);
+        assert_eq!(config.export.affine.base_url, "https://app.affine.pro");
+    }
+
+    #[test]
+    fn test_export_config_partial_toml() {
+        let toml_str = r#"
+[export.affine]
+enabled = true
+api_token = "ut_xyz"
+"#;
+        let config: AppConfig = toml::from_str(toml_str).expect("parse");
+        assert!(config.export.affine.enabled);
+        assert_eq!(config.export.affine.api_token, "ut_xyz");
+        // Unspecified fields keep their defaults.
+        assert_eq!(config.export.affine.base_url, "https://app.affine.pro");
+        assert!(config.export.affine.email.is_empty());
     }
 
     #[test]

@@ -18,7 +18,7 @@
 //! - [`Page::Settings`] — settings form backed by [`SettingsModel`]
 //! - [`Page::Browser`] — transcript list + detail viewer with search
 
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use iced::widget::rule;
 use iced::widget::{
@@ -29,6 +29,9 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 use vox_core::config::AppConfig;
 use vox_core::session::{Session, Summary};
+use vox_export::{
+    ExportRequest, ExportResult, ExportTarget, Folder as ExportFolder, Workspace as ExportWorkspace,
+};
 use vox_storage::store::{JsonFileStore, SessionStore};
 
 use crate::browser::{SessionListEntry, build_session_list};
@@ -150,6 +153,18 @@ pub enum Message {
     /// The export format pick-list changed.
     ExportFormatChanged(ExportFormat),
 
+    // ── Settings: Export (Affine) ────────────────────────────────────
+    /// The `AFFiNE`export enabled toggle changed.
+    AffineEnabledToggled(bool),
+    /// The `AFFiNE`base URL text field changed.
+    AffineBaseUrlChanged(String),
+    /// The `AFFiNE`API token text field changed.
+    AffineApiTokenChanged(String),
+    /// The `AFFiNE`login email text field changed.
+    AffineEmailChanged(String),
+    /// The `AFFiNE`login password text field changed.
+    AffinePasswordChanged(String),
+
     // ── Settings: Notifications ──────────────────────────────────────────────
     /// Master notifications toggle changed.
     NotificationsEnabledToggled(bool),
@@ -203,6 +218,36 @@ pub enum Message {
     /// Speaker names were persisted to disk (carries success flag).
     SpeakerNamesSaved(bool),
 
+    // ── Browser: send-to (plugin export) ─────────────────────────────
+    /// Open the Send-to modal — triggers `list_workspaces` on the target.
+    OpenSendToModal,
+    /// Close the Send-to modal without sending.
+    CloseSendToModal,
+    /// Document-title text field in the Send-to modal changed.
+    SendToTitleChanged(String),
+    /// Content pick-list in the Send-to modal changed.
+    SendToContentChanged(ExportContent),
+    /// Workspace list finished loading.
+    SendToWorkspacesLoaded(Result<Vec<ExportWorkspace>, String>),
+    /// User chose a workspace in the Send-to modal.
+    SendToWorkspaceSelected(ExportWorkspace),
+    /// Folder list finished loading.
+    SendToFoldersLoaded(Result<Vec<ExportFolder>, String>),
+    /// User picked a folder (parent doc) or `None` for workspace root.
+    SendToFolderSelected(Option<ExportFolder>),
+    /// Toggle between "pick existing folder" and "create new folder" modes.
+    SendToCreateFolderToggle,
+    /// New-folder title text field changed.
+    SendToCreateFolderTitleChanged(String),
+    /// Commit the new-folder creation (calls `target.create_folder`).
+    SendToCreateFolderCommit,
+    /// New folder creation finished.
+    SendToFolderCreated(Result<ExportFolder, String>),
+    /// User confirmed the send — triggers `target.export`.
+    ConfirmSendTo,
+    /// Send finished; carries the remote URL (on success) or an error message.
+    SendToResult(Result<String, String>),
+
     // ── Browser: summarization ───────────────────────────────────────────
     /// The user requested manual AI summary generation for the selected session.
     GenerateSummary,
@@ -230,6 +275,83 @@ impl Default for ExportModalState {
         Self {
             content: ExportContent::TranscriptAndSummary,
             format: ExportFormat::Markdown,
+        }
+    }
+}
+
+/// State for the Send-to modal overlay (plugin-based export).
+///
+/// One `SendToModalState` exists per open-and-send interaction. The enabled
+/// target (`target`) is cloned in each request to allow concurrent background
+/// loads (workspace list, folder list, send) while the user continues
+/// interacting with the modal.
+#[allow(clippy::struct_excessive_bools)]
+pub struct SendToModalState {
+    /// The plugin target the user is sending to. Currently always `AffineTarget`.
+    pub target: Arc<dyn ExportTarget>,
+    /// User-editable document title.
+    pub title: String,
+    /// Which content to include in the rendered Markdown.
+    pub content: ExportContent,
+    /// All workspaces visible on the remote service.
+    pub workspaces: Vec<ExportWorkspace>,
+    /// `true` while a workspace load is in flight.
+    pub workspaces_loading: bool,
+    /// The selected workspace.
+    pub selected_workspace: Option<ExportWorkspace>,
+    /// All folders (parent docs) within the selected workspace.
+    pub folders: Vec<ExportFolder>,
+    /// `true` while a folder load is in flight.
+    pub folders_loading: bool,
+    /// The selected folder, or `None` for "workspace root".
+    pub selected_folder: Option<ExportFolder>,
+    /// `true` when the user is typing a new folder name.
+    pub creating_folder: bool,
+    /// Title of the folder being created.
+    pub new_folder_title: String,
+    /// `true` while the final send is in flight.
+    pub sending: bool,
+    /// Last error message (if any) to surface inline.
+    pub error: Option<String>,
+}
+
+impl std::fmt::Debug for SendToModalState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // `target` is a trait object so we cannot derive Debug; print its id
+        // and a summary of the interesting state. `finish_non_exhaustive`
+        // keeps the lint happy without forcing us to enumerate every field.
+        f.debug_struct("SendToModalState")
+            .field("target", &self.target.id())
+            .field("title", &self.title)
+            .field("workspaces", &self.workspaces.len())
+            .field("folders", &self.folders.len())
+            .field("sending", &self.sending)
+            .finish_non_exhaustive()
+    }
+}
+
+impl SendToModalState {
+    /// Construct a fresh modal for the given target and default values.
+    #[must_use]
+    pub fn new(
+        target: Arc<dyn ExportTarget>,
+        default_title: String,
+        default_content: ExportContent,
+    ) -> Self {
+        Self {
+            target,
+            title: default_title,
+            content: default_content,
+            workspaces: Vec::new(),
+            workspaces_loading: true,
+            selected_workspace: None,
+            folders: Vec::new(),
+            folders_loading: false,
+            selected_folder: None,
+            creating_folder: false,
+            new_folder_title: String::new(),
+            sending: false,
+            error: None,
         }
     }
 }
@@ -279,6 +401,9 @@ pub struct VoxAppState {
 
     /// When `Some`, the export modal is open.
     pub export_modal: Option<ExportModalState>,
+
+    /// When `Some`, the Send-to (plugin export) modal is open.
+    pub send_to_modal: Option<SendToModalState>,
 }
 
 impl VoxAppState {
@@ -344,6 +469,7 @@ impl VoxAppState {
             browser_status: None,
             summarizing: false,
             export_modal: None,
+            send_to_modal: None,
         }
     }
 
@@ -461,6 +587,28 @@ pub fn update(state: &mut VoxAppState, message: Message) -> Task<Message> {
         }
         Message::ExportFormatChanged(f) => {
             state.settings.storage.export_format = f;
+            Task::none()
+        }
+
+        // ── Export settings (Affine) ──────────────────────────────────────
+        Message::AffineEnabledToggled(v) => {
+            state.settings.export.affine.enabled = v;
+            Task::none()
+        }
+        Message::AffineBaseUrlChanged(s) => {
+            state.settings.export.affine.base_url = s;
+            Task::none()
+        }
+        Message::AffineApiTokenChanged(s) => {
+            state.settings.export.affine.api_token = s;
+            Task::none()
+        }
+        Message::AffineEmailChanged(s) => {
+            state.settings.export.affine.email = s;
+            Task::none()
+        }
+        Message::AffinePasswordChanged(s) => {
+            state.settings.export.affine.password = s;
             Task::none()
         }
 
@@ -698,6 +846,225 @@ pub fn update(state: &mut VoxAppState, message: Message) -> Task<Message> {
             Task::none()
         }
 
+        // ── Browser: send-to (plugin export) ─────────────────────────
+        Message::OpenSendToModal => {
+            let Some(ref session) = state.selected_session else {
+                return Task::none();
+            };
+            let config = state.settings.to_config();
+            let mut targets = vox_export::build_targets(&config.export);
+            if targets.is_empty() {
+                state.browser_status = Some(
+                    "No export targets enabled — configure one in Settings → Export.".to_owned(),
+                );
+                return Task::none();
+            }
+            let target: Arc<dyn ExportTarget> = Arc::from(targets.remove(0));
+            let default_title = default_export_title(session);
+            let modal = SendToModalState::new(
+                target.clone(),
+                default_title,
+                ExportContent::TranscriptAndSummary,
+            );
+            state.send_to_modal = Some(modal);
+            Task::perform(
+                async move { target.list_workspaces().await.map_err(|e| e.to_string()) },
+                Message::SendToWorkspacesLoaded,
+            )
+        }
+        Message::CloseSendToModal => {
+            state.send_to_modal = None;
+            Task::none()
+        }
+        Message::SendToTitleChanged(t) => {
+            if let Some(ref mut modal) = state.send_to_modal {
+                modal.title = t;
+            }
+            Task::none()
+        }
+        Message::SendToContentChanged(c) => {
+            if let Some(ref mut modal) = state.send_to_modal {
+                modal.content = c;
+            }
+            Task::none()
+        }
+        Message::SendToWorkspacesLoaded(result) => {
+            if let Some(ref mut modal) = state.send_to_modal {
+                modal.workspaces_loading = false;
+                match result {
+                    Ok(ws) => {
+                        modal.workspaces = ws;
+                        modal.error = None;
+                    }
+                    Err(e) => modal.error = Some(format!("Failed to load workspaces: {e}")),
+                }
+            }
+            Task::none()
+        }
+        Message::SendToWorkspaceSelected(ws) => {
+            let Some(ref mut modal) = state.send_to_modal else {
+                return Task::none();
+            };
+            modal.selected_workspace = Some(ws.clone());
+            modal.folders.clear();
+            modal.selected_folder = None;
+            modal.folders_loading = true;
+            let target = modal.target.clone();
+            let ws_id = ws.id;
+            Task::perform(
+                async move { target.list_folders(&ws_id).await.map_err(|e| e.to_string()) },
+                Message::SendToFoldersLoaded,
+            )
+        }
+        Message::SendToFoldersLoaded(result) => {
+            if let Some(ref mut modal) = state.send_to_modal {
+                modal.folders_loading = false;
+                match result {
+                    Ok(fs) => {
+                        modal.folders = fs;
+                        modal.error = None;
+                    }
+                    Err(e) => modal.error = Some(format!("Failed to load folders: {e}")),
+                }
+            }
+            Task::none()
+        }
+        Message::SendToFolderSelected(f) => {
+            if let Some(ref mut modal) = state.send_to_modal {
+                modal.selected_folder = f;
+                modal.creating_folder = false;
+            }
+            Task::none()
+        }
+        Message::SendToCreateFolderToggle => {
+            if let Some(ref mut modal) = state.send_to_modal {
+                modal.creating_folder = !modal.creating_folder;
+                if modal.creating_folder {
+                    modal.selected_folder = None;
+                } else {
+                    modal.new_folder_title.clear();
+                }
+            }
+            Task::none()
+        }
+        Message::SendToCreateFolderTitleChanged(t) => {
+            if let Some(ref mut modal) = state.send_to_modal {
+                modal.new_folder_title = t;
+            }
+            Task::none()
+        }
+        Message::SendToCreateFolderCommit => {
+            let Some(ref modal) = state.send_to_modal else {
+                return Task::none();
+            };
+            let Some(ref ws) = modal.selected_workspace else {
+                return Task::none();
+            };
+            if modal.new_folder_title.trim().is_empty() {
+                return Task::none();
+            }
+            let target = modal.target.clone();
+            let ws_id = ws.id.clone();
+            let title = modal.new_folder_title.clone();
+            Task::perform(
+                async move {
+                    target
+                        .create_folder(&ws_id, None, &title)
+                        .await
+                        .map_err(|e| e.to_string())
+                },
+                Message::SendToFolderCreated,
+            )
+        }
+        Message::SendToFolderCreated(result) => {
+            if let Some(ref mut modal) = state.send_to_modal {
+                match result {
+                    Ok(folder) => {
+                        modal.folders.push(folder.clone());
+                        modal.selected_folder = Some(folder);
+                        modal.creating_folder = false;
+                        modal.new_folder_title.clear();
+                        modal.error = None;
+                    }
+                    Err(e) => modal.error = Some(format!("Failed to create folder: {e}")),
+                }
+            }
+            Task::none()
+        }
+        Message::ConfirmSendTo => {
+            let Some(ref mut modal) = state.send_to_modal else {
+                return Task::none();
+            };
+            let Some(ref session) = state.selected_session else {
+                return Task::none();
+            };
+            let Some(ref ws) = modal.selected_workspace else {
+                modal.error = Some("Pick a workspace first.".to_owned());
+                return Task::none();
+            };
+            if modal.title.trim().is_empty() {
+                modal.error = Some("Title is required.".to_owned());
+                return Task::none();
+            }
+
+            modal.sending = true;
+            modal.error = None;
+
+            let target = modal.target.clone();
+            let title = modal.title.trim().to_owned();
+            let workspace_id = ws.id.clone();
+            let parent_id = modal.selected_folder.as_ref().map(|f| f.id.clone());
+            let include_transcript = matches!(
+                modal.content,
+                ExportContent::Transcript | ExportContent::TranscriptAndSummary
+            );
+            let include_summary = matches!(
+                modal.content,
+                ExportContent::Summary | ExportContent::TranscriptAndSummary
+            );
+            let session = session.clone();
+
+            Task::perform(
+                async move {
+                    let options = vox_storage::RenderOptions {
+                        include_transcript,
+                        include_summary,
+                    };
+                    let markdown = vox_storage::render_export(&session, "markdown", &options)?;
+                    let request = ExportRequest {
+                        workspace_id,
+                        parent_id,
+                        title,
+                        content_markdown: &markdown,
+                        session: &session,
+                    };
+                    let ExportResult {
+                        remote_url,
+                        remote_id,
+                    } = target.export(request).await.map_err(|e| e.to_string())?;
+                    Ok(remote_url.unwrap_or(remote_id))
+                },
+                Message::SendToResult,
+            )
+        }
+        Message::SendToResult(result) => {
+            match result {
+                Ok(url) => {
+                    info!(%url, "send-to export succeeded");
+                    state.send_to_modal = None;
+                    state.browser_status = Some(format!("Sent to {url}"));
+                }
+                Err(e) => {
+                    error!("send-to export failed: {e}");
+                    if let Some(ref mut modal) = state.send_to_modal {
+                        modal.sending = false;
+                        modal.error = Some(e);
+                    }
+                }
+            }
+            Task::none()
+        }
+
         // ── Browser: summarization ───────────────────────────────────────
         Message::GenerateSummary => {
             let Some(ref session) = state.selected_session else {
@@ -781,6 +1148,16 @@ pub fn update(state: &mut VoxAppState, message: Message) -> Task<Message> {
 
 /// Build the widget tree for the current state.
 pub fn view(state: &VoxAppState) -> Element<'_, Message> {
+    // Send-to modal takes over the window when open (checked before export
+    // modal so the two cannot visually stack).
+    if let Some(ref modal) = state.send_to_modal {
+        return container(view_send_to_form(modal))
+            .width(Fill)
+            .height(Fill)
+            .padding(vox_theme::PADDING)
+            .into();
+    }
+
     // When the export form is open, it takes over the entire window.
     if let Some(ref modal) = state.export_modal {
         let has_transcript = state
@@ -903,6 +1280,184 @@ fn view_export_form<'a>(
             export_btn.style(button::primary),
         ]
         .spacing(vox_theme::SPACING),
+    ]
+    .spacing(vox_theme::SECTION_SPACING)
+    .padding(vox_theme::PADDING)
+    .into()
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Send-to (plugin export) view
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Wrapper around an optional folder for the pick-list widget (iced's
+/// `pick_list` wants a single `T: Clone + Eq + Display`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FolderChoice {
+    Root,
+    Existing(ExportFolder),
+}
+
+impl std::fmt::Display for FolderChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Root => f.write_str("— Workspace root —"),
+            Self::Existing(folder) => f.write_str(&folder.title),
+        }
+    }
+}
+
+/// Default document title for a session: `meeting-YYYY-MM-DD`.
+fn default_export_title(session: &Session) -> String {
+    let date = session.created_at.format("%Y-%m-%d").to_string();
+    format!("meeting-{date}")
+}
+
+#[allow(clippy::too_many_lines)]
+fn view_send_to_form(modal: &SendToModalState) -> Element<'_, Message> {
+    let header = text(format!("Send to {}", modal.target.display_name())).size(16u32);
+
+    // ── Title ────────────────────────────────────────────────────────────
+    let title_field = column![
+        text("Document title").size(12u32),
+        text_input("meeting-YYYY-MM-DD", &modal.title)
+            .on_input(Message::SendToTitleChanged)
+            .width(Fill),
+    ]
+    .spacing(4);
+
+    // ── Content toggle (reuses the existing enum) ────────────────────────
+    let content_field = column![
+        text("Content").size(12u32),
+        pick_list(
+            ExportContent::all(),
+            Some(modal.content),
+            Message::SendToContentChanged,
+        )
+        .width(Fill),
+    ]
+    .spacing(4);
+
+    // ── Workspace picker ─────────────────────────────────────────────────
+    let workspace_picker: Element<'_, Message> = if modal.workspaces_loading {
+        text("Loading workspaces…").size(12u32).into()
+    } else if modal.workspaces.is_empty() {
+        text("No workspaces available.").size(12u32).into()
+    } else {
+        pick_list(
+            modal.workspaces.clone(),
+            modal.selected_workspace.clone(),
+            Message::SendToWorkspaceSelected,
+        )
+        .placeholder("Choose a workspace…")
+        .width(Fill)
+        .into()
+    };
+    let workspace_field = column![text("Workspace").size(12u32), workspace_picker].spacing(4);
+
+    // ── Folder picker + Create-new toggle ────────────────────────────────
+    let folder_field: Element<'_, Message> = if modal.selected_workspace.is_none() {
+        column![
+            text("Folder").size(12u32),
+            text("Pick a workspace first.").size(11u32),
+        ]
+        .spacing(4)
+        .into()
+    } else if modal.folders_loading {
+        column![
+            text("Folder").size(12u32),
+            text("Loading folders…").size(11u32),
+        ]
+        .spacing(4)
+        .into()
+    } else if modal.creating_folder {
+        let commit_btn = if modal.new_folder_title.trim().is_empty() {
+            button("Create")
+        } else {
+            button("Create").on_press(Message::SendToCreateFolderCommit)
+        };
+        column![
+            text("New folder").size(12u32),
+            text_input("Folder title", &modal.new_folder_title)
+                .on_input(Message::SendToCreateFolderTitleChanged)
+                .width(Fill),
+            row![
+                commit_btn.style(button::primary),
+                button("Cancel")
+                    .on_press(Message::SendToCreateFolderToggle)
+                    .style(button::secondary),
+            ]
+            .spacing(vox_theme::SPACING),
+        ]
+        .spacing(4)
+        .into()
+    } else {
+        let mut choices: Vec<FolderChoice> = vec![FolderChoice::Root];
+        choices.extend(modal.folders.iter().cloned().map(FolderChoice::Existing));
+        let selected = match &modal.selected_folder {
+            Some(f) => Some(FolderChoice::Existing(f.clone())),
+            None => Some(FolderChoice::Root),
+        };
+        column![
+            text("Folder").size(12u32),
+            pick_list(choices, selected, |choice| {
+                Message::SendToFolderSelected(match choice {
+                    FolderChoice::Root => None,
+                    FolderChoice::Existing(f) => Some(f),
+                })
+            })
+            .width(Fill),
+            button("+ Create new folder")
+                .on_press(Message::SendToCreateFolderToggle)
+                .style(button::text),
+        ]
+        .spacing(4)
+        .into()
+    };
+
+    // ── Error / status line ──────────────────────────────────────────────
+    let status: Element<'_, Message> = if let Some(ref err) = modal.error {
+        text(err.clone())
+            .size(11u32)
+            .color(Color {
+                r: 0.85,
+                g: 0.25,
+                b: 0.25,
+                a: 1.0,
+            })
+            .into()
+    } else if modal.sending {
+        text("Sending…").size(11u32).into()
+    } else {
+        column![].into()
+    };
+
+    // ── Send / Cancel buttons ────────────────────────────────────────────
+    let can_send =
+        !modal.sending && modal.selected_workspace.is_some() && !modal.title.trim().is_empty();
+    let send_btn = if can_send {
+        button("Send").on_press(Message::ConfirmSendTo)
+    } else {
+        button("Send")
+    };
+
+    let buttons = row![
+        button("Cancel")
+            .on_press(Message::CloseSendToModal)
+            .style(button::secondary),
+        send_btn.style(button::primary),
+    ]
+    .spacing(vox_theme::SPACING);
+
+    column![
+        header,
+        rule::horizontal(1),
+        title_field,
+        content_field,
+        workspace_field,
+        folder_field,
+        status,
+        buttons,
     ]
     .spacing(vox_theme::SECTION_SPACING)
     .padding(vox_theme::PADDING)
@@ -1106,6 +1661,52 @@ fn view_settings(state: &VoxAppState) -> Element<'_, Message> {
         ],
     );
 
+    // ── Export (Affine) section ───────────────────────────────────────────
+    let affine_section = section_column(
+        "Export — AFFiNE",
+        column![
+            toggle_row(
+                "Enable AFFiNE export",
+                s.export.affine.enabled,
+                Message::AffineEnabledToggled,
+            ),
+            stacked_text_input(
+                "AFFiNE base URL",
+                "e.g. https://app.affine.pro or https://affine.example.com",
+                &s.export.affine.base_url,
+                Message::AffineBaseUrlChanged,
+            ),
+            column![
+                text("API token (required for AFFiNE Cloud)").size(13u32),
+                text_input(
+                    "ut_… — generate under Settings → Integrations",
+                    &s.export.affine.api_token,
+                )
+                .on_input(Message::AffineApiTokenChanged)
+                .secure(true)
+                .width(Fill),
+            ]
+            .spacing(vox_theme::SPACING / 2.0),
+            stacked_text_input(
+                "Email (self-hosted only)",
+                "Used when api_token is empty",
+                &s.export.affine.email,
+                Message::AffineEmailChanged,
+            ),
+            column![
+                text("Password (self-hosted only)").size(13u32),
+                text_input(
+                    "Stored in plaintext — chmod 600 your config",
+                    &s.export.affine.password
+                )
+                .on_input(Message::AffinePasswordChanged)
+                .secure(true)
+                .width(Fill),
+            ]
+            .spacing(vox_theme::SPACING / 2.0),
+        ],
+    );
+
     // ── About section ─────────────────────────────────────────────────────
     let about_section = section_column(
         "About",
@@ -1140,6 +1741,7 @@ fn view_settings(state: &VoxAppState) -> Element<'_, Message> {
                 summarization_section,
                 storage_section,
                 notifications_section,
+                affine_section,
                 about_section,
                 save_row,
             ]
@@ -1226,6 +1828,7 @@ fn view_session_detail(session: &Session, summarizing: bool) -> Element<'_, Mess
     // ── Action buttons ────────────────────────────────────────────────────
     let mut actions = row![
         button("Export").on_press(Message::OpenExportModal),
+        button("Send to…").on_press(Message::OpenSendToModal),
         button("Delete Session").on_press(Message::DeleteSelectedSession),
     ]
     .spacing(vox_theme::SPACING);

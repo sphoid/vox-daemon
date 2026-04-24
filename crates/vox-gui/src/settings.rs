@@ -7,8 +7,8 @@
 //! directly to the TOML serialization types.
 
 use vox_core::config::{
-    AppConfig, AudioConfig, NotificationConfig, StorageConfig, SummarizationConfig,
-    TranscriptionConfig,
+    AffineExportConfig, AppConfig, AudioConfig, ExportConfig, NotificationConfig, StorageConfig,
+    SummarizationConfig, TranscriptionConfig,
 };
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -367,6 +367,71 @@ pub struct StorageSettings {
     pub export_format: ExportFormat,
 }
 
+/// Export-target settings, mirroring [`ExportConfig`].
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ExportSettings {
+    /// `AFFiNE` export plugin settings.
+    pub affine: AffineSettings,
+}
+
+/// `AFFiNE` export plugin settings, mirroring [`AffineExportConfig`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AffineSettings {
+    /// Whether the `AFFiNE` target is enabled.
+    pub enabled: bool,
+    /// Base URL of the `AFFiNE` server (cloud or self-hosted).
+    pub base_url: String,
+    /// Personal access token (required for cloud).
+    ///
+    /// Stored in plaintext in `config.toml`; users should `chmod 600` the
+    /// config file.
+    pub api_token: String,
+    /// Login email (self-hosted only).
+    pub email: String,
+    /// Login password (self-hosted only). Plaintext — see `api_token`.
+    pub password: String,
+    /// Optional default workspace id for the Send-to picker.
+    pub default_workspace_id: String,
+    /// Optional default parent-doc id for the Send-to picker.
+    pub default_parent_id: String,
+}
+
+impl Default for AffineSettings {
+    fn default() -> Self {
+        Self::from_config(&AffineExportConfig::default())
+    }
+}
+
+impl AffineSettings {
+    /// Construct from an [`AffineExportConfig`].
+    #[must_use]
+    pub fn from_config(cfg: &AffineExportConfig) -> Self {
+        Self {
+            enabled: cfg.enabled,
+            base_url: cfg.base_url.clone(),
+            api_token: cfg.api_token.clone(),
+            email: cfg.email.clone(),
+            password: cfg.password.clone(),
+            default_workspace_id: cfg.default_workspace_id.clone(),
+            default_parent_id: cfg.default_parent_id.clone(),
+        }
+    }
+
+    /// Convert back to an [`AffineExportConfig`].
+    #[must_use]
+    pub fn to_config(&self) -> AffineExportConfig {
+        AffineExportConfig {
+            enabled: self.enabled,
+            base_url: self.base_url.clone(),
+            api_token: self.api_token.clone(),
+            email: self.email.clone(),
+            password: self.password.clone(),
+            default_workspace_id: self.default_workspace_id.clone(),
+            default_parent_id: self.default_parent_id.clone(),
+        }
+    }
+}
+
 /// Notification settings, mirroring [`NotificationConfig`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(clippy::struct_excessive_bools)]
@@ -404,6 +469,8 @@ pub struct SettingsModel {
     pub storage: StorageSettings,
     /// Notification settings.
     pub notifications: NotificationSettings,
+    /// Export-target (Affine, etc.) settings.
+    pub export: ExportSettings,
 }
 
 impl SettingsModel {
@@ -480,6 +547,9 @@ impl SettingsModel {
                 on_transcript_ready: config.notifications.on_transcript_ready,
                 on_summary_ready: config.notifications.on_summary_ready,
             },
+            export: ExportSettings {
+                affine: AffineSettings::from_config(&config.export.affine),
+            },
         }
     }
 
@@ -521,6 +591,9 @@ impl SettingsModel {
                 on_record_stop: self.notifications.on_record_stop,
                 on_transcript_ready: self.notifications.on_transcript_ready,
                 on_summary_ready: self.notifications.on_summary_ready,
+            },
+            export: ExportConfig {
+                affine: self.export.affine.to_config(),
             },
         }
     }

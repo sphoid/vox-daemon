@@ -6,6 +6,7 @@ members = [
     "crates/vox-transcribe",
     "crates/vox-summarize",
     "crates/vox-storage",
+    "crates/vox-export",
     "crates/vox-diarize",
     "crates/vox-gui",
     "crates/vox-tray",
@@ -52,6 +53,7 @@ vox-capture = { path = "crates/vox-capture" }
 vox-transcribe = { path = "crates/vox-transcribe" }
 vox-summarize = { path = "crates/vox-summarize" }
 vox-storage = { path = "crates/vox-storage" }
+vox-export = { path = "crates/vox-export" }
 vox-gui = { path = "crates/vox-gui" }
 vox-tray = { path = "crates/vox-tray" }
 vox-diarize = { path = "crates/vox-diarize" }
