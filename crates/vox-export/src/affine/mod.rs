@@ -190,8 +190,32 @@ impl ExportTarget for AffineTarget {
 
     #[instrument(skip(self))]
     async fn list_folders(&self, workspace_id: &str) -> Result<Vec<Folder>, ExportError> {
+        // `AFFiNE`'s GraphQL `workspace(id).docs` returns `title: null` on
+        // self-hosted instances — the real title lives in each doc's Yjs
+        // body, and the workspace's root doc mirrors a `{id, title}` map
+        // of all its pages under `meta.pages`.  Load that once instead of
+        // fanning out per-doc.
         let headers = self.auth.ensure_headers(&self.http, &self.base_url).await?;
-        graphql::list_docs(&self.http, &self.base_url, &headers, workspace_id).await
+        let ws_url = self.ws_url();
+        let client = socket::WorkspaceSocket::connect(&ws_url, &headers).await?;
+        client.join(workspace_id).await?;
+        let bytes = client.load_doc(workspace_id, workspace_id).await?;
+        let _ = client.leave(workspace_id).await;
+        client.disconnect().await;
+
+        let Some(bytes) = bytes else {
+            return Ok(Vec::new());
+        };
+        let pages = ydoc::extract_workspace_pages(&bytes);
+        let mut folders: Vec<Folder> = pages
+            .into_iter()
+            .map(|p| Folder {
+                id: p.id,
+                title: p.title.unwrap_or_else(|| "Untitled".to_owned()),
+            })
+            .collect();
+        folders.sort_by(|a, b| a.title.cmp(&b.title));
+        Ok(folders)
     }
 
     #[instrument(skip(self, title))]

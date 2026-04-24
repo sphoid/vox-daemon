@@ -230,6 +230,73 @@ pub fn extract_workspace_name(update_bytes: &[u8]) -> Option<String> {
     }
 }
 
+/// One page entry as stored in a workspace root doc's `meta.pages` array.
+///
+/// `AFFiNE` populates each entry with at least `id` and `title`, plus
+/// `createDate` and `tags` (not read here).  Matches the shape produced
+/// by [`build_workspace_meta_append`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspacePage {
+    /// The doc's opaque id (matches the GraphQL `DocType.id`).
+    pub id: String,
+    /// Human-readable title; `None` when the entry has no title set
+    /// (rare — usually a brand-new draft).
+    pub title: Option<String>,
+}
+
+/// Extract every page entry from a workspace root doc's `meta.pages`
+/// array.  Returns an empty vec if `meta.pages` is absent or malformed.
+///
+/// `AFFiNE`'s GraphQL schema exposes doc ids and titles via
+/// `workspace(id).docs`, but on self-hosted instances the `title` field
+/// is often `null`; loading the root doc directly and reading the
+/// authoritative `meta.pages` array gives reliable titles.
+#[must_use]
+pub fn extract_workspace_pages(update_bytes: &[u8]) -> Vec<WorkspacePage> {
+    let Ok(update) = yrs::Update::decode_v1(update_bytes) else {
+        return Vec::new();
+    };
+    let doc = Doc::new();
+    {
+        let mut txn = doc.transact_mut();
+        if txn.apply_update(update).is_err() {
+            return Vec::new();
+        }
+    }
+    let meta = doc.get_or_insert_map("meta");
+    let txn = doc.transact();
+
+    let Some(Out::YArray(pages)) = meta.get(&txn, "pages") else {
+        tracing::debug!("workspace-pages: meta.pages missing or not an array");
+        return Vec::new();
+    };
+
+    let mut out = Vec::with_capacity(pages.len(&txn) as usize);
+    for value in pages.iter(&txn) {
+        let Out::YMap(entry) = value else { continue };
+        let Some(Out::Any(Any::String(id))) = entry.get(&txn, "id") else {
+            continue;
+        };
+        let title = match entry.get(&txn, "title") {
+            Some(Out::Any(Any::String(s))) => {
+                let owned = s.to_string();
+                if owned.is_empty() { None } else { Some(owned) }
+            }
+            Some(Out::YText(text)) => {
+                let owned = text.get_string(&txn);
+                if owned.is_empty() { None } else { Some(owned) }
+            }
+            _ => None,
+        };
+        out.push(WorkspacePage {
+            id: id.to_string(),
+            title,
+        });
+    }
+    tracing::debug!(count = out.len(), "workspace-pages: extracted entries");
+    out
+}
+
 /// Build an `affine:embed-linked-doc` block appended to `parent_doc_id`'s
 /// content, pointing at `child_doc_id`.
 ///
@@ -351,6 +418,48 @@ mod tests {
     #[test]
     fn extract_workspace_name_rejects_malformed_bytes() {
         assert!(extract_workspace_name(b"not a yjs update").is_none());
+    }
+
+    #[test]
+    fn extract_workspace_pages_reads_meta_pages_array() {
+        // Simulate a workspace root doc with two pages in `meta.pages`.
+        let doc = Doc::new();
+        let meta = doc.get_or_insert_map("meta");
+        {
+            let mut txn = doc.transact_mut();
+            let pages: yrs::ArrayRef = meta.insert(&mut txn, "pages", ArrayPrelim::default());
+            let e1 = pages.push_back(&mut txn, MapPrelim::default());
+            e1.insert(&mut txn, "id", "doc-one");
+            e1.insert(&mut txn, "title", "Meeting notes");
+            let e2 = pages.push_back(&mut txn, MapPrelim::default());
+            e2.insert(&mut txn, "id", "doc-two");
+            e2.insert(&mut txn, "title", "");
+        }
+        let bytes = doc
+            .transact()
+            .encode_state_as_update_v1(&yrs::StateVector::default());
+
+        let pages = extract_workspace_pages(&bytes);
+        assert_eq!(pages.len(), 2);
+        assert_eq!(pages[0].id, "doc-one");
+        assert_eq!(pages[0].title.as_deref(), Some("Meeting notes"));
+        assert_eq!(pages[1].id, "doc-two");
+        assert!(pages[1].title.is_none());
+    }
+
+    #[test]
+    fn extract_workspace_pages_empty_when_no_meta_pages() {
+        let doc = Doc::new();
+        let _meta = doc.get_or_insert_map("meta");
+        let bytes = doc
+            .transact()
+            .encode_state_as_update_v1(&yrs::StateVector::default());
+        assert!(extract_workspace_pages(&bytes).is_empty());
+    }
+
+    #[test]
+    fn extract_workspace_pages_rejects_malformed_bytes() {
+        assert!(extract_workspace_pages(b"garbage").is_empty());
     }
 
     #[test]

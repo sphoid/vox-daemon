@@ -9,31 +9,13 @@ use serde::{Deserialize, Serialize};
 use tracing::debug;
 
 use super::auth::AuthHeaders;
-use crate::{
-    error::ExportError,
-    traits::{Folder, Workspace},
-};
+use crate::{error::ExportError, traits::Workspace};
 
 const WORKSPACES_QUERY: &str = r"
 query Workspaces {
   workspaces {
     id
     public
-  }
-}";
-
-const DOCS_QUERY: &str = r"
-query WorkspaceDocs($id: String!, $first: Int!, $offset: Int!) {
-  workspace(id: $id) {
-    id
-    docs(pagination: { first: $first, offset: $offset }) {
-      edges {
-        node {
-          id
-          title
-        }
-      }
-    }
   }
 }";
 
@@ -150,70 +132,6 @@ pub fn workspace_with_fallback_name(id: String) -> Workspace {
     }
 }
 
-#[derive(Deserialize)]
-struct DocsData {
-    workspace: DocsWorkspace,
-}
-
-#[derive(Deserialize)]
-struct DocsWorkspace {
-    docs: DocsConnection,
-}
-
-#[derive(Deserialize)]
-struct DocsConnection {
-    edges: Vec<DocsEdge>,
-}
-
-#[derive(Deserialize)]
-struct DocsEdge {
-    node: DocNode,
-}
-
-#[derive(Deserialize)]
-struct DocNode {
-    id: String,
-    #[serde(default)]
-    title: Option<String>,
-}
-
-#[derive(Serialize)]
-struct DocsVariables<'a> {
-    id: &'a str,
-    first: i32,
-    offset: i32,
-}
-
-/// Fetch the first page of docs in `workspace_id`. Returns up to 200 docs —
-/// enough for the Send-to picker; full pagination is not needed.
-///
-/// # Errors
-///
-/// Returns [`ExportError`] on transport or API failure.
-pub async fn list_docs(
-    http: &Client,
-    base_url: &str,
-    headers: &AuthHeaders,
-    workspace_id: &str,
-) -> Result<Vec<Folder>, ExportError> {
-    let vars = DocsVariables {
-        id: workspace_id,
-        first: 200,
-        offset: 0,
-    };
-    let data: DocsData = send(http, base_url, headers, DOCS_QUERY, Some(vars)).await?;
-    Ok(data
-        .workspace
-        .docs
-        .edges
-        .into_iter()
-        .map(|e| Folder {
-            id: e.node.id.clone(),
-            title: e.node.title.unwrap_or_else(|| "Untitled".to_owned()),
-        })
-        .collect())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,30 +152,5 @@ mod tests {
         let ws = parsed.data.expect("data");
         assert_eq!(ws.workspaces.len(), 1);
         assert_eq!(ws.workspaces[0].id, "abc");
-    }
-
-    #[test]
-    fn gql_response_parses_docs() {
-        let body = r#"{
-          "data": {
-            "workspace": {
-              "docs": {
-                "edges": [
-                  { "node": { "id": "d1", "title": "Notes" } },
-                  { "node": { "id": "d2", "title": null } }
-                ]
-              }
-            }
-          }
-        }"#;
-        let parsed: GqlResponse<DocsData> = serde_json::from_str(body).expect("parse");
-        let data = parsed.data.expect("data");
-        assert_eq!(data.workspace.docs.edges.len(), 2);
-        assert_eq!(data.workspace.docs.edges[0].node.id, "d1");
-        assert_eq!(
-            data.workspace.docs.edges[0].node.title.as_deref(),
-            Some("Notes")
-        );
-        assert!(data.workspace.docs.edges[1].node.title.is_none());
     }
 }

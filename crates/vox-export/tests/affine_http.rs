@@ -113,35 +113,10 @@ async fn password_login_exchanges_credentials_for_cookie() {
     assert_eq!(workspaces[0].id, "ws-only");
 }
 
-#[tokio::test]
-async fn list_folders_pages_through_docs_query() {
-    let server = MockServer::start().await;
-
-    Mock::given(method("POST"))
-        .and(path("/graphql"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "data": { "workspace": { "docs": { "edges": [
-                { "node": { "id": "d1", "title": "Notes" } },
-                { "node": { "id": "d2", "title": null } }
-            ]}}}
-        })))
-        .mount(&server)
-        .await;
-
-    let target = AffineTarget::from_config(&AffineExportConfig {
-        enabled: true,
-        base_url: server.uri(),
-        api_token: "t".to_owned(),
-        ..AffineExportConfig::default()
-    })
-    .expect("build");
-
-    let folders = target.list_folders("ws-1").await.expect("list");
-    assert_eq!(folders.len(), 2);
-    assert_eq!(folders[0].id, "d1");
-    assert_eq!(folders[0].title, "Notes");
-    assert_eq!(folders[1].title, "Untitled");
-}
+// list_folders previously used GraphQL but now loads the workspace root
+// Yjs doc via Socket.IO (real titles live there, not in GraphQL). The
+// realtime path has no HTTP-mock-equivalent; it's covered by the ydoc
+// unit tests (`extract_workspace_pages_*`).
 
 #[tokio::test]
 async fn failed_sign_in_maps_to_auth_error() {
