@@ -153,26 +153,34 @@ impl ExportTarget for AffineTarget {
             }
         };
 
-        for id in ids {
-            let resolved = match tokio::time::timeout(
-                WORKSPACE_NAME_FETCH_TIMEOUT,
-                fetch_workspace_name_on(&client, &id),
-            )
-            .await
-            {
-                Ok(Ok(Some(n))) => n,
-                Ok(Ok(None)) => graphql::fallback_workspace_name(&id),
-                Ok(Err(e)) => {
-                    warn!(workspace = %id, error = %e,
-                        "realtime workspace-name fetch failed; using id");
-                    graphql::fallback_workspace_name(&id)
+        // First pass.  The first `space:join` on a fresh socket takes
+        // 15–45s while the `AFFiNE` server cold-loads workspace state,
+        // which tends to eat whichever workspace goes first.  We track
+        // those so we can retry them once the socket is warm.
+        let mut retry_ids = Vec::new();
+        for id in &ids {
+            match resolve_workspace_name(&client, id).await {
+                Ok(Some(name)) => workspaces.push(Workspace {
+                    id: id.clone(),
+                    name,
+                }),
+                Ok(None) => {
+                    // Doc loaded but carries no `meta.name` — no point
+                    // retrying; keep the placeholder.
+                    workspaces.push(graphql::workspace_with_fallback_name(id.clone()));
                 }
-                Err(_) => {
-                    warn!(workspace = %id, "workspace-name fetch timed out; using id");
-                    graphql::fallback_workspace_name(&id)
-                }
+                Err(()) => retry_ids.push(id.clone()),
+            }
+        }
+
+        // Retry any that timed out / errored on the cold socket.  By now
+        // the socket is warm so these typically finish in milliseconds.
+        for id in retry_ids {
+            let name = match resolve_workspace_name(&client, &id).await {
+                Ok(Some(n)) => n,
+                Ok(None) | Err(()) => graphql::fallback_workspace_name(&id),
             };
-            workspaces.push(Workspace { id, name: resolved });
+            workspaces.push(Workspace { id, name });
         }
 
         client.disconnect().await;
@@ -274,6 +282,36 @@ impl ExportTarget for AffineTarget {
 
 fn encode(bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+/// Run one attempt at resolving a workspace's name.
+///
+/// Return values:
+/// - `Ok(Some(name))`: name resolved successfully.
+/// - `Ok(None)`: the workspace's root doc loaded but has no `meta.name`.
+///   Retrying won't help — caller should keep the placeholder.
+/// - `Err(())`: timeout or transport error; caller may retry.
+async fn resolve_workspace_name(
+    client: &socket::WorkspaceSocket,
+    workspace_id: &str,
+) -> Result<Option<String>, ()> {
+    match tokio::time::timeout(
+        WORKSPACE_NAME_FETCH_TIMEOUT,
+        fetch_workspace_name_on(client, workspace_id),
+    )
+    .await
+    {
+        Ok(Ok(name)) => Ok(name),
+        Ok(Err(e)) => {
+            warn!(workspace = %workspace_id, error = %e,
+                "realtime workspace-name fetch failed; will retry");
+            Err(())
+        }
+        Err(_) => {
+            warn!(workspace = %workspace_id, "workspace-name fetch timed out; will retry");
+            Err(())
+        }
+    }
 }
 
 /// Join the workspace on a pre-opened socket, load its root Yjs doc,
