@@ -40,11 +40,11 @@ use crate::{
     traits::{ExportRequest, ExportResult, ExportTarget, Folder, Workspace},
 };
 
-/// Per-workspace timeout for the realtime name fetch.  Covers the full
-/// connect + join + load-doc round-trip.  Keeps a single slow workspace
-/// from blocking the rest of the list; callers fall back to the short-id
-/// placeholder on timeout.
-const WORKSPACE_NAME_FETCH_TIMEOUT: Duration = Duration::from_secs(20);
+/// Per-workspace timeout for the realtime name fetch.  Covers join +
+/// load-doc + leave.  Must be > the Socket.IO ack timeout because the
+/// first `space:join` on a fresh socket can take 15–25 s while the
+/// `AFFiNE` server cold-loads workspace state.
+const WORKSPACE_NAME_FETCH_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// `AFFiNE` export target.
 pub struct AffineTarget {

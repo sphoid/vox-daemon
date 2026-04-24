@@ -21,7 +21,11 @@ use crate::error::ExportError;
 const CLIENT_VERSION: &str = "0.26.0";
 
 /// Timeout for each Socket.IO ack round-trip.
-const ACK_TIMEOUT: Duration = Duration::from_secs(15);
+///
+/// Set generously: `AFFiNE` servers can take 15–25 s to ack the first
+/// `space:join` on a fresh socket (cold-load of the workspace's Yjs state
+/// from persistent storage). Subsequent emits are typically sub-10 ms.
+const ACK_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// Connected Socket.IO client scoped to one `AFFiNE` workspace session.
 pub struct WorkspaceSocket {
@@ -124,7 +128,8 @@ impl WorkspaceSocket {
             "spaceId": workspace_id,
             "docId": doc_id,
         });
-        let ack = self.emit_with_ack("space:load-doc", payload).await?;
+        let raw = self.emit_with_ack("space:load-doc", payload).await?;
+        let ack = unwrap_ack_body(&raw);
 
         if let Some(err_obj) = ack.get("error") {
             let name = err_obj.get("name").and_then(|n| n.as_str()).unwrap_or("");
@@ -138,11 +143,21 @@ impl WorkspaceSocket {
             return Err(ExportError::Transport(format!("space:load-doc: {msg}")));
         }
 
-        let Some(b64) = ack
+        // Accept both server shapes observed in the wild:
+        //   { data: { missing: "…" } }   (documented)
+        //   { missing: "…" }             (un-wrapped)
+        let missing = ack
             .get("data")
             .and_then(|d| d.get("missing"))
-            .and_then(|v| v.as_str())
-        else {
+            .or_else(|| ack.get("missing"))
+            .and_then(|v| v.as_str());
+        let Some(b64) = missing else {
+            debug!(
+                workspace_id,
+                doc_id,
+                ack = %raw,
+                "space:load-doc: no `missing` field in ack"
+            );
             return Ok(None);
         };
         let bytes = base64::engine::general_purpose::STANDARD
@@ -232,7 +247,8 @@ fn ack_debug_shape(ack: &Value) -> String {
 /// Treat the `error` field (if present) of an ack as a transport failure.
 /// Used by events that have no graceful "not found" path.
 fn check_ack_error(event: &'static str, ack: &Value) -> Result<(), ExportError> {
-    if let Some(err_obj) = ack.get("error") {
+    let body = unwrap_ack_body(ack);
+    if let Some(err_obj) = body.get("error") {
         let msg = err_obj
             .get("message")
             .and_then(|m| m.as_str())
@@ -240,4 +256,19 @@ fn check_ack_error(event: &'static str, ack: &Value) -> Result<(), ExportError> 
         return Err(ExportError::Transport(format!("{event}: {msg}")));
     }
     Ok(())
+}
+
+/// Unwrap a single-element JSON array wrapper around an ack body.
+///
+/// `AFFiNE`'s `NestJS` gateway sometimes sends acks as `cb([{…}])` rather
+/// than `cb({…})` — same semantic payload wrapped in a one-element array.
+/// Peel it so downstream `.get("data")` / `.get("error")` calls work
+/// regardless of the wrapper shape.
+fn unwrap_ack_body(ack: &Value) -> &Value {
+    if let Value::Array(items) = ack {
+        if items.len() == 1 {
+            return &items[0];
+        }
+    }
+    ack
 }
