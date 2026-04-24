@@ -67,6 +67,22 @@ impl WorkspaceSocket {
         check_ack_error("space:join", &ack)
     }
 
+    /// Emit `space:leave` so the server releases its adapter binding for
+    /// this space. Call between `join`s when reusing one socket across
+    /// multiple workspaces.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ExportError::Transport`] if the server acks with an error.
+    pub async fn leave(&self, workspace_id: &str) -> Result<(), ExportError> {
+        let payload = json!({
+            "spaceType": "workspace",
+            "spaceId": workspace_id,
+        });
+        let ack = self.emit_with_ack("space:leave", payload).await?;
+        check_ack_error("space:leave", &ack)
+    }
+
     /// Emit `space:push-doc-update` with a base64-encoded Yjs update.
     ///
     /// # Errors

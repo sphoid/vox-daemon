@@ -32,11 +32,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use base64::Engine as _;
 use reqwest::Client;
-use tokio::task::JoinSet;
 use tracing::{debug, info, instrument, warn};
 use vox_core::config::AffineExportConfig;
 
-use self::auth::AuthHeaders;
 use crate::{
     error::ExportError,
     traits::{ExportRequest, ExportResult, ExportTarget, Folder, Workspace},
@@ -134,47 +132,50 @@ impl ExportTarget for AffineTarget {
         let headers = self.auth.ensure_headers(&self.http, &self.base_url).await?;
         let ids = graphql::list_workspace_ids(&self.http, &self.base_url, &headers).await?;
 
-        // `AFFiNE` does not expose workspace names via GraphQL — they live in
-        // each workspace's root Yjs doc under `meta.name`. Fan out the
-        // realtime fetches so the picker doesn't stall on a slow workspace;
-        // individual failures / timeouts fall back to the short-id name.
+        // `AFFiNE` does not expose workspace names via GraphQL — they live
+        // in each workspace's root Yjs doc under `meta.name`.  We open a
+        // single Socket.IO connection and serially join each workspace,
+        // load its root doc, and leave.  Parallel fan-out was tried first
+        // but `AFFiNE` does not ack `space:join` when multiple fresh
+        // sockets race each other from the same user session.
         let ws_url = self.ws_url();
-        let mut set: JoinSet<Workspace> = JoinSet::new();
-        for id in ids {
-            let ws_url = ws_url.clone();
-            let headers = headers.clone();
-            set.spawn(async move {
-                let name = tokio::time::timeout(
-                    WORKSPACE_NAME_FETCH_TIMEOUT,
-                    fetch_workspace_name(&ws_url, &headers, &id),
-                )
-                .await;
-
-                let resolved = match name {
-                    Ok(Ok(Some(n))) => n,
-                    Ok(Ok(None)) => graphql::fallback_workspace_name(&id),
-                    Ok(Err(e)) => {
-                        warn!(workspace = %id, error = %e,
-                            "realtime workspace-name fetch failed; using id");
-                        graphql::fallback_workspace_name(&id)
-                    }
-                    Err(_) => {
-                        warn!(workspace = %id, "workspace-name fetch timed out; using id");
-                        graphql::fallback_workspace_name(&id)
-                    }
-                };
-                Workspace { id, name: resolved }
-            });
-        }
-
         let mut workspaces = Vec::new();
-        while let Some(joined) = set.join_next().await {
-            match joined {
-                Ok(ws) => workspaces.push(ws),
-                Err(e) => warn!(error = %e, "workspace-name task panicked"),
+        let client = match socket::WorkspaceSocket::connect(&ws_url, &headers).await {
+            Ok(c) => c,
+            Err(e) => {
+                warn!(error = %e,
+                    "failed to open socket for workspace-name lookup; using id placeholders");
+                for id in ids {
+                    workspaces.push(graphql::workspace_with_fallback_name(id));
+                }
+                workspaces.sort_by(|a, b| a.name.cmp(&b.name));
+                return Ok(workspaces);
             }
+        };
+
+        for id in ids {
+            let resolved = match tokio::time::timeout(
+                WORKSPACE_NAME_FETCH_TIMEOUT,
+                fetch_workspace_name_on(&client, &id),
+            )
+            .await
+            {
+                Ok(Ok(Some(n))) => n,
+                Ok(Ok(None)) => graphql::fallback_workspace_name(&id),
+                Ok(Err(e)) => {
+                    warn!(workspace = %id, error = %e,
+                        "realtime workspace-name fetch failed; using id");
+                    graphql::fallback_workspace_name(&id)
+                }
+                Err(_) => {
+                    warn!(workspace = %id, "workspace-name fetch timed out; using id");
+                    graphql::fallback_workspace_name(&id)
+                }
+            };
+            workspaces.push(Workspace { id, name: resolved });
         }
-        // Sort by display name so the picker order is stable across calls.
+
+        client.disconnect().await;
         workspaces.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(workspaces)
     }
@@ -275,23 +276,16 @@ fn encode(bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
-/// Open a short-lived Socket.IO connection, load the workspace's root Yjs
-/// doc, and extract `meta.name`.  Returns `Ok(None)` when the doc exists
-/// but has no name set (e.g. fresh workspace).
-async fn fetch_workspace_name(
-    ws_url: &str,
-    headers: &AuthHeaders,
+/// Join the workspace on a pre-opened socket, load its root Yjs doc,
+/// extract `meta.name`, then leave again so the socket is clean for the
+/// next workspace.
+///
+/// Returns `Ok(None)` when the doc exists but has no name set.
+async fn fetch_workspace_name_on(
+    client: &socket::WorkspaceSocket,
     workspace_id: &str,
 ) -> Result<Option<String>, ExportError> {
     let overall = std::time::Instant::now();
-
-    let step = std::time::Instant::now();
-    let client = socket::WorkspaceSocket::connect(ws_url, headers).await?;
-    debug!(
-        workspace_id,
-        elapsed_ms = u64::try_from(step.elapsed().as_millis()).unwrap_or(u64::MAX),
-        "workspace-name: connected"
-    );
 
     let step = std::time::Instant::now();
     client.join(workspace_id).await?;
@@ -310,7 +304,11 @@ async fn fetch_workspace_name(
         "workspace-name: load-doc returned"
     );
 
-    client.disconnect().await;
+    // Leave so the server's per-space adapter binding is released before
+    // the next `join`. Errors here are non-fatal.
+    if let Err(e) = client.leave(workspace_id).await {
+        debug!(workspace_id, error = %e, "workspace-name: leave failed (non-fatal)");
+    }
 
     let Some(bytes) = bytes else {
         debug!(
