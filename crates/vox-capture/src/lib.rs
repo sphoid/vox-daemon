@@ -45,6 +45,7 @@ pub mod mock;
 // Convenience re-exports so callers only need to import from `vox_capture`.
 pub use error::CaptureError;
 pub use metrics::AudioStats;
+pub use resample::StreamingResampler;
 pub use source::AudioSource;
 pub use types::{AudioChunk, StreamFilter, StreamInfo, StreamRole};
 

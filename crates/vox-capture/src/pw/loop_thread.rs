@@ -21,7 +21,7 @@
 //! is passed directly as a function argument to [`run_loop`]. Only `Stop` is
 //! sent over the channel so the PipeWire timer can pick it up.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -258,10 +258,19 @@ fn open_capture_stream(
     // Fires once per ~1 second of raw audio at the source rate.
     let log_sample_counter: std::rc::Rc<Cell<u64>> = std::rc::Rc::new(Cell::new(0_u64));
 
+    // One streaming resampler instance per stream — held across callback
+    // invocations so the FFT cold-start transient occurs once at session
+    // start, not at every chunk boundary.  See the `resample` module docs.
+    let streaming_resampler: std::rc::Rc<RefCell<crate::resample::StreamingResampler>> =
+        std::rc::Rc::new(RefCell::new(crate::resample::StreamingResampler::new(
+            resample::TARGET_SAMPLE_RATE,
+        )));
+
     // Clones for process callback.
     let rate_proc = std::rc::Rc::clone(&src_rate);
     let chan_proc = std::rc::Rc::clone(&src_channels);
     let log_counter_proc = std::rc::Rc::clone(&log_sample_counter);
+    let resampler_proc = std::rc::Rc::clone(&streaming_resampler);
 
     // Clones for param_changed callback.
     let rate_fmt = std::rc::Rc::clone(&src_rate);
@@ -342,7 +351,20 @@ fn open_capture_stream(
                 log_counter_proc.set(new_count);
             }
 
-            match resample::convert(&samples, rate, channels) {
+            // Convert interleaved multi-channel input to mono (stateless),
+            // then feed the streaming resampler (stateful — one instance per
+            // stream, see closure setup above).  The streaming resampler may
+            // return an empty Vec when it is buffering a partial chunk; in
+            // that case there is no AudioChunk to send this iteration.
+            let resampled = match resample::to_mono(&samples, channels) {
+                Ok(mono) => resampler_proc.borrow_mut().push(&mono, rate),
+                Err(e) => Err(e),
+            };
+
+            match resampled {
+                Ok(pcm) if pcm.is_empty() => {
+                    // Buffered residue — wait for more input.
+                }
                 Ok(pcm) => {
                     // --- Checkpoint 2: stats on resampled PCM ---
                     // Reuse the same per-stream counter threshold: the counter
