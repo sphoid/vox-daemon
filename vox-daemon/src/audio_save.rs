@@ -7,12 +7,24 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use vox_capture::AudioStats;
 
 /// Saves `f32` audio samples as a 16-bit PCM WAV file.
 ///
 /// Samples are expected to be in the range `[-1.0, 1.0]` at 16 kHz mono.
 /// Values outside that range are clamped before conversion.
 pub fn save_wav(path: &Path, samples: &[f32]) -> Result<()> {
+    let stats = AudioStats::compute(samples);
+    let clipped = samples.iter().filter(|&&s| s.abs() > 1.0).count();
+    tracing::debug!(
+        path = %path.display(),
+        samples = samples.len(),
+        peak_dbfs = stats.peak_dbfs(),
+        rms_dbfs = stats.rms_dbfs(),
+        clipped_samples = clipped,
+        "wav write input stats"
+    );
+
     let spec = hound::WavSpec {
         channels: 1,
         sample_rate: 16_000,
@@ -25,7 +37,7 @@ pub fn save_wav(path: &Path, samples: &[f32]) -> Result<()> {
     for &s in samples {
         let clamped = s.clamp(-1.0, 1.0);
         #[allow(clippy::cast_possible_truncation)]
-        let sample_i16 = (clamped * f32::from(i16::MAX)) as i16;
+        let sample_i16 = (clamped * f32::from(i16::MAX)).round() as i16;
         writer
             .write_sample(sample_i16)
             .context("failed to write WAV sample")?;
@@ -93,7 +105,11 @@ mod tests {
 
         // Generate a short sine wave at 440 Hz.
         let samples: Vec<f32> = (0..16_000)
-            .map(|i| (2.0 * std::f32::consts::PI * 440.0 * i as f32 / 16_000.0).sin() * 0.5)
+            .map(|i| {
+                #[allow(clippy::cast_precision_loss)]
+                let t = i as f32 / 16_000.0;
+                (2.0 * std::f32::consts::PI * 440.0 * t).sin() * 0.5
+            })
             .collect();
 
         save_wav(&path, &samples).expect("save");

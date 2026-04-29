@@ -49,6 +49,29 @@ use crate::transcriber::{TranscriptionRequest, TranscriptionResult};
 /// We warn — but do not error — for chunks below this threshold.
 const MIN_MEANINGFUL_SAMPLES: usize = 1_600; // 100 ms at 16 kHz
 
+/// Compute the root-mean-square level of a slice of `f32` audio samples.
+///
+/// Returns `0.0` for an empty slice.  The result is a linear amplitude
+/// value in the range `[0.0, 1.0]` for normalised PCM audio.
+fn compute_rms(samples: &[f32]) -> f32 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    let sum_sq: f64 = samples.iter().map(|&s| f64::from(s) * f64::from(s)).sum();
+    #[allow(clippy::cast_possible_truncation)]
+    ((sum_sq / samples.len() as f64).sqrt() as f32)
+}
+
+/// Returns `true` if the entire trimmed text is enclosed in brackets or
+/// parentheses (e.g., `"[Music]"`, `"(applause)"`, `"[Sounds of a game]"`).
+///
+/// These are non-speech annotations that Whisper uses as in-distribution
+/// hallucinations when it is not confident about speech content.
+fn is_bracketed_text(s: &str) -> bool {
+    let t = s.trim();
+    (t.starts_with('[') && t.ends_with(']')) || (t.starts_with('(') && t.ends_with(')'))
+}
+
 /// A [`Transcriber`] backed by whisper.cpp via the `whisper-rs` crate.
 ///
 /// The [`WhisperContext`] holding the loaded model weights is shared across
@@ -177,6 +200,14 @@ impl WhisperTranscriber {
         // Suppress spurious output from silent segments.
         params.set_no_speech_thold(self.config.no_speech_thold);
 
+        // Suppress blank tokens at the start of each segment.
+        params.set_suppress_blank(self.config.suppress_blank);
+
+        // Suppress non-speech tokens (e.g., [Music], (applause)).
+        // This is the primary defence against bracketed hallucinations during
+        // beam search / greedy decoding.
+        params.set_suppress_nst(self.config.suppress_non_speech_tokens);
+
         // Temperature and fallback settings.
         params.set_temperature(self.config.temperature);
         params.set_temperature_inc(self.config.temperature_inc);
@@ -250,6 +281,22 @@ impl Transcriber for WhisperTranscriber {
             );
         }
 
+        // Energy gate: skip inference on near-silent buffers to avoid hallucinations.
+        let rms = compute_rms(&request.audio);
+        let rms_dbfs = if rms > 0.0 {
+            20.0 * rms.log10()
+        } else {
+            f32::NEG_INFINITY
+        };
+        if rms_dbfs < self.config.min_rms_dbfs {
+            warn!(
+                rms_dbfs,
+                threshold = self.config.min_rms_dbfs,
+                "audio buffer below energy gate; skipping transcription"
+            );
+            return Ok(TranscriptionResult::new(Vec::new()));
+        }
+
         let speaker_label = request.source.speaker_label();
         let offset = request.time_offset_secs;
 
@@ -304,6 +351,25 @@ impl Transcriber for WhisperTranscriber {
                 continue;
             }
 
+            // A3: retrieve the no-speech probability for this segment.
+            let no_speech_prob = seg.no_speech_probability();
+
+            // B2: drop bracketed/parenthesised hallucinations even when
+            // Whisper's segment-level no_speech_thold didn't catch them.
+            // Examples: "[Music]", "(applause)", "[Sounds of a game]".
+            // We use half the configured threshold as the cutoff because
+            // these annotations sometimes have lower no_speech_prob than
+            // the segment-level gate, yet are still very likely hallucinations.
+            if is_bracketed_text(&text) && no_speech_prob > self.config.no_speech_thold * 0.5 {
+                debug!(
+                    segment = i,
+                    text = %text,
+                    no_speech_prob,
+                    "skipping bracketed hallucination"
+                );
+                continue;
+            }
+
             // whisper.cpp timestamps are in centiseconds (1/100 s).
             let start_cs = seg.start_timestamp();
             let end_cs = seg.end_timestamp();
@@ -318,6 +384,7 @@ impl Transcriber for WhisperTranscriber {
                 start_time,
                 end_time,
                 speaker = speaker_label,
+                no_speech_prob,
                 text = %text,
                 "segment decoded"
             );
@@ -368,4 +435,63 @@ mod tests {
     /// object-safe API (this is a compile-time check embedded in a test).
     #[allow(dead_code)]
     fn _assert_trait_object_safe(_: &dyn Transcriber) {}
+
+    // --- compute_rms tests ---
+
+    #[test]
+    fn test_compute_rms_empty_returns_zero() {
+        assert_eq!(compute_rms(&[]), 0.0);
+    }
+
+    #[test]
+    fn test_compute_rms_constant_one() {
+        let samples = vec![1.0_f32; 1_000];
+        let result = compute_rms(&samples);
+        assert!((result - 1.0).abs() < 1e-5, "expected 1.0, got {result}");
+    }
+
+    #[test]
+    fn test_compute_rms_constant_half() {
+        let samples = vec![0.5_f32; 1_000];
+        let result = compute_rms(&samples);
+        assert!((result - 0.5).abs() < 1e-5, "expected 0.5, got {result}");
+    }
+
+    // --- is_bracketed_text tests ---
+
+    #[test]
+    fn test_is_bracketed_square_brackets() {
+        assert!(is_bracketed_text("[Music]"));
+        assert!(is_bracketed_text("[Sounds of a game]"));
+        assert!(is_bracketed_text("[Applause]"));
+    }
+
+    #[test]
+    fn test_is_bracketed_parentheses() {
+        assert!(is_bracketed_text("(applause)"));
+        assert!(is_bracketed_text("(laughter)"));
+    }
+
+    #[test]
+    fn test_is_bracketed_with_whitespace() {
+        assert!(is_bracketed_text("  [Music]  "));
+        assert!(is_bracketed_text("  (applause)  "));
+    }
+
+    #[test]
+    fn test_is_not_bracketed_real_speech() {
+        assert!(!is_bracketed_text("Hello, how are you?"));
+        assert!(!is_bracketed_text("This is a test."));
+        assert!(!is_bracketed_text(""));
+    }
+
+    #[test]
+    fn test_is_not_bracketed_partial() {
+        // Starts with bracket but does not end with closing bracket
+        assert!(!is_bracketed_text("[incomplete"));
+        // Ends with bracket but does not start with opening bracket
+        assert!(!is_bracketed_text("incomplete]"));
+        // Mixed brackets
+        assert!(!is_bracketed_text("[mixed)"));
+    }
 }

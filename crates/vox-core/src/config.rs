@@ -164,6 +164,33 @@ pub struct TranscriptionConfig {
     /// No-speech probability threshold — segments above this are suppressed.
     #[serde(default = "default_no_speech_thold")]
     pub no_speech_thold: f32,
+
+    /// Suppress blank tokens at the start of a segment.
+    ///
+    /// When enabled, Whisper will not output segments that begin with blank
+    /// (silence) tokens, which can reduce hallucinated output on quiet audio.
+    #[serde(default = "default_true")]
+    pub suppress_blank: bool,
+
+    /// Suppress non-speech tokens (e.g., `[Music]`, `(applause)`).
+    ///
+    /// When enabled, Whisper's internal non-speech token suppression list is
+    /// applied during beam search / greedy decoding. This is one of the primary
+    /// defences against bracketed hallucinations on low-confidence audio.
+    #[serde(default = "default_true")]
+    pub suppress_non_speech_tokens: bool,
+
+    /// Energy gate in dBFS.
+    ///
+    /// If the root-mean-square energy of the audio buffer is below this
+    /// threshold (in decibels relative to full scale), Whisper inference is
+    /// skipped entirely and an empty result is returned.  This prevents
+    /// hallucinations on near-silent buffers.
+    ///
+    /// Set to `f32::NEG_INFINITY` (or a very large negative value) to disable
+    /// the gate.  Default is `-50.0` dBFS.
+    #[serde(default = "default_energy_gate_dbfs")]
+    pub min_rms_dbfs: f32,
 }
 
 impl Default for TranscriptionConfig {
@@ -186,6 +213,9 @@ impl Default for TranscriptionConfig {
             entropy_thold: 2.4,
             logprob_thold: -1.0,
             no_speech_thold: 0.6,
+            suppress_blank: true,
+            suppress_non_speech_tokens: true,
+            min_rms_dbfs: -50.0,
         }
     }
 }
@@ -369,6 +399,10 @@ fn default_logprob_thold() -> f32 {
 
 fn default_no_speech_thold() -> f32 {
     0.6
+}
+
+fn default_energy_gate_dbfs() -> f32 {
+    -50.0
 }
 
 #[cfg(test)]
