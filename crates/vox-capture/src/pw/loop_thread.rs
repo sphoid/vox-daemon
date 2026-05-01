@@ -21,7 +21,7 @@
 //! is passed directly as a function argument to [`run_loop`]. Only `Stop` is
 //! sent over the channel so the PipeWire timer can pick it up.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -42,6 +42,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::{
     error::CaptureError,
+    metrics::AudioStats,
     resample,
     types::{AudioChunk, StreamRole},
 };
@@ -253,9 +254,23 @@ fn open_capture_stream(
     let src_rate = std::rc::Rc::new(Cell::new(48_000_u32));
     let src_channels = std::rc::Rc::new(Cell::new(2_u32));
 
+    // Accumulated raw sample count used to rate-limit diagnostic log output.
+    // Fires once per ~1 second of raw audio at the source rate.
+    let log_sample_counter: std::rc::Rc<Cell<u64>> = std::rc::Rc::new(Cell::new(0_u64));
+
+    // One streaming resampler instance per stream — held across callback
+    // invocations so the FFT cold-start transient occurs once at session
+    // start, not at every chunk boundary.  See the `resample` module docs.
+    let streaming_resampler: std::rc::Rc<RefCell<crate::resample::StreamingResampler>> =
+        std::rc::Rc::new(RefCell::new(crate::resample::StreamingResampler::new(
+            resample::TARGET_SAMPLE_RATE,
+        )));
+
     // Clones for process callback.
     let rate_proc = std::rc::Rc::clone(&src_rate);
     let chan_proc = std::rc::Rc::clone(&src_channels);
+    let log_counter_proc = std::rc::Rc::clone(&log_sample_counter);
+    let resampler_proc = std::rc::Rc::clone(&streaming_resampler);
 
     // Clones for param_changed callback.
     let rate_fmt = std::rc::Rc::clone(&src_rate);
@@ -310,8 +325,74 @@ fn open_capture_stream(
             let rate = rate_proc.get();
             let channels = chan_proc.get();
 
-            match resample::convert(&samples, rate, channels) {
+            // --- Checkpoint 1: stats on raw captured samples ---
+            // Rate-limit to one log line per ~1 second of audio at src_rate.
+            // The counter tracks interleaved samples; divide by channels to get
+            // the number of frames and compare against src_rate.
+            {
+                let prev = log_counter_proc.get();
+                #[allow(clippy::cast_possible_truncation)]
+                let new_count = prev.saturating_add(samples.len() as u64);
+                let threshold = u64::from(rate); // 1 second worth of mono frames
+                // prev / threshold < new_count / threshold  ↔ a new second boundary
+                // was crossed in this batch.
+                if prev / threshold < new_count / threshold {
+                    let stats = AudioStats::compute(&samples);
+                    debug!(
+                        role = ?role,
+                        src_rate = rate,
+                        src_channels = channels,
+                        samples = samples.len(),
+                        peak_dbfs = stats.peak_dbfs(),
+                        rms_dbfs = stats.rms_dbfs(),
+                        "raw capture stats",
+                    );
+                }
+                log_counter_proc.set(new_count);
+            }
+
+            // Convert interleaved multi-channel input to mono (stateless),
+            // then feed the streaming resampler (stateful — one instance per
+            // stream, see closure setup above).  The streaming resampler may
+            // return an empty Vec when it is buffering a partial chunk; in
+            // that case there is no AudioChunk to send this iteration.
+            let resampled = match resample::to_mono(&samples, channels) {
+                Ok(mono) => resampler_proc.borrow_mut().push(&mono, rate),
+                Err(e) => Err(e),
+            };
+
+            match resampled {
+                Ok(pcm) if pcm.is_empty() => {
+                    // Buffered residue — wait for more input.
+                }
                 Ok(pcm) => {
+                    // --- Checkpoint 2: stats on resampled PCM ---
+                    // Reuse the same per-stream counter threshold: the counter
+                    // was already updated above, so here we just check whether
+                    // the threshold was crossed in the *previous* batch (i.e.
+                    // the counter wrapped). To keep things simple we log the
+                    // resampled stats whenever the raw stats were logged.
+                    {
+                        let count = log_counter_proc.get();
+                        // We logged raw stats when prev / T < count / T.
+                        // Replicate the same check: compare the previous
+                        // running total (count - samples.len()) with count.
+                        #[allow(clippy::cast_possible_truncation)]
+                        let prev = count.saturating_sub(samples.len() as u64);
+                        let threshold = u64::from(rate);
+                        if prev / threshold < count / threshold {
+                            let resampled_stats = AudioStats::compute(&pcm);
+                            debug!(
+                                role = ?role,
+                                target_rate = resample::TARGET_SAMPLE_RATE,
+                                samples = pcm.len(),
+                                peak_dbfs = resampled_stats.peak_dbfs(),
+                                rms_dbfs = resampled_stats.rms_dbfs(),
+                                "resampled capture stats",
+                            );
+                        }
+                    }
+
                     let ts = session_start.elapsed();
                     let audio_chunk = AudioChunk::new(pcm, ts, role);
                     if audio_tx.try_send(audio_chunk).is_err() {

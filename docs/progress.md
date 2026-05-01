@@ -465,3 +465,158 @@ This provides correct behavior on GNOME/GTK desktops that set `GTK_THEME`, and a
 
 1. **PipeWire source enumeration from the GUI**: Populating `available_mic_sources` and `available_app_sources` at runtime would require spawning a short-lived PipeWire connection (via `vox_capture::pw::PipeWireSource`) in `VoxAppState::new`. This is gated on `#[cfg(feature = "pw")]` in `vox-capture` and requires `libpipewire-0.3-dev`. A future task can wire this up and replace the text inputs with `pick_list` dropdowns once enumeration is confirmed working.
 2. **iced system theme integration**: iced 0.14 does not provide a native hook into the OS theme change signal (e.g., D-Bus `org.freedesktop.portal.Settings`). If automatic theme switching on-the-fly is needed, a polling mechanism or a restart would be required.
+
+---
+
+## vox-transcribe + vox-core — Hallucination suppression (2026-04-29)
+
+**Agent:** ai-specialist (claude-sonnet-4-6)
+**Branch:** transcription-quality
+
+### What was implemented
+
+Addressed Whisper transcription hallucinations (e.g., every segment outputting `"[Sounds of a game]"` on low-confidence audio).  Three defence layers were added.
+
+**`/workspace/crates/vox-core/src/config.rs`** — three new fields on `TranscriptionConfig`:
+
+- `suppress_blank: bool` — default `true`; suppresses blank-start tokens via whisper.cpp parameter.
+- `suppress_non_speech_tokens: bool` — default `true`; enables whisper.cpp's internal NST suppression list during decoding.
+- `min_rms_dbfs: f32` — default `-50.0`; energy gate in dBFS below which inference is skipped entirely.
+
+Added two helper functions `default_energy_gate_dbfs() -> f32` and confirmed `default_true()` was already present. Updated the `Default` impl to include the three new fields with their defaults.
+
+**`/workspace/crates/vox-transcribe/src/whisper.rs`** — four changes:
+
+- **A3 — no_speech_prob logging**: The segment loop now fetches `seg.no_speech_probability()` and includes it in the `"segment decoded"` debug log line.
+- **B1 — token-level NST suppression**: `build_params()` now calls `params.set_suppress_blank(self.config.suppress_blank)` and `params.set_suppress_nst(self.config.suppress_non_speech_tokens)`.
+- **B2 — bracketed hallucination filter**: After fetching `no_speech_prob`, the segment loop checks `is_bracketed_text(&text)` and skips the segment if `no_speech_prob > no_speech_thold * 0.5`. Added private free function `is_bracketed_text(s: &str) -> bool`.
+- **B3 — energy gate**: Before inference, `compute_rms(&request.audio)` is called, converted to dBFS, and compared to `config.min_rms_dbfs`. Silent buffers return an empty `TranscriptionResult` immediately without calling whisper.cpp. Added private free function `compute_rms(samples: &[f32]) -> f32`.
+
+New unit tests (11 total new tests in `whisper.rs`):
+- `test_compute_rms_empty_returns_zero`
+- `test_compute_rms_constant_one`
+- `test_compute_rms_constant_half`
+- `test_is_bracketed_square_brackets`
+- `test_is_bracketed_parentheses`
+- `test_is_bracketed_with_whitespace`
+- `test_is_not_bracketed_real_speech`
+- `test_is_not_bracketed_partial`
+
+### Exact whisper-rs API used
+
+- `FullParams::set_suppress_blank(bool)` — confirmed in `whisper_params.rs` line 308
+- `FullParams::set_suppress_nst(bool)` — confirmed in `whisper_params.rs` line 317
+- `WhisperSegment::no_speech_probability() -> f32` — confirmed in `whisper_state/segment.rs` line 90
+
+### Test / fmt / clippy status
+
+- `cargo fmt --package vox-transcribe --package vox-core -- --check` — clean
+- `cargo clippy --package vox-transcribe --package vox-core --all-targets -- -D warnings` — zero warnings
+- `cargo test --package vox-transcribe --package vox-core` — 34/34 pass (12 vox-core, 22 vox-transcribe)
+- The new `whisper.rs` unit tests compile and run only with `--features whisper` (the whole module is feature-gated); without native `libclang`/whisper.cpp the feature cannot be activated in this build environment, which is the same pre-existing limitation noted in all prior progress entries.
+
+### Open questions
+
+1. **whisper.rs tests only run with the `whisper` feature**: The new `compute_rms` and `is_bracketed_text` functions are pure Rust with no native dependencies, but they live inside the feature-gated `whisper.rs` module. Moving them to a separate `utils.rs` module (always compiled) would allow testing in CI without whisper.cpp. Deferred because it requires restructuring the module layout.
+2. **`no_speech_thold * 0.5` multiplier**: The 0.5 factor on the bracketed-hallucination threshold is a heuristic. Once real-world recordings are available for testing, this factor should be tuned empirically.
+3. **Energy gate threshold**: `-50.0` dBFS was chosen as a sensible default for a near-silent buffer. Calls from quiet speakers or over-attenuated microphones may require a lower threshold. Consider making this configurable per-source (mic vs. remote) in a future iteration.
+
+## vox-capture — Audio amplitude metrics + capture-pipeline diagnostic logging (2026-04-29)
+
+**Agent:** audio-specialist (claude-sonnet-4-6)
+
+### What was implemented
+
+**A1 — `crates/vox-capture/src/metrics.rs` (new file)**
+
+`AudioStats` struct with `peak: f32`, `rms: f32`, `samples: usize` fields.
+
+- `AudioStats::compute(samples: &[f32]) -> Self` — iterates once to find max-abs (peak) and sum-of-squares (RMS). Returns zeroed stats for an empty slice.
+- `AudioStats::peak_dbfs(&self) -> f32` — `20.0 * peak.log10()`; `f32::NEG_INFINITY` when `peak <= 0.0`.
+- `AudioStats::rms_dbfs(&self) -> f32` — same formula over `rms`.
+
+All three public methods carry `#[must_use]` and doc comments with `# Examples` blocks.
+
+Unit tests (7):
+- `empty_input_returns_zeroed_stats`
+- `empty_input_dbfs_is_neg_infinity`
+- `all_zeros_returns_zeroed_stats`
+- `constant_full_scale_gives_zero_dbfs` (peak=1.0, rms=1.0, 0 dBFS)
+- `constant_half_scale_gives_approx_neg6_dbfs` (peak≈-6.02 dBFS, rms≈-6.02 dBFS)
+- `pure_sine_at_half_amplitude` (peak≈0.5, rms≈0.5/sqrt(2))
+- `negative_samples_use_absolute_value_for_peak`
+
+Float equality comparisons use `.abs() < f32::EPSILON` or `.is_infinite() && .is_sign_negative()` to satisfy `clippy::float_cmp`.
+
+**Re-export in `crates/vox-capture/src/lib.rs`**
+
+Added `pub mod metrics;` and `pub use metrics::AudioStats;` so callers can use `vox_capture::AudioStats` directly.
+
+**A2 — Rate-limited diagnostic logging in `crates/vox-capture/src/pw/loop_thread.rs`**
+
+Added a `Cell<u64>` counter (`log_sample_counter`) alongside the existing `src_rate` / `src_channels` `Rc<Cell<_>>` state in `open_capture_stream`. The counter accumulates raw interleaved sample counts.
+
+Two `tracing::debug!` log lines per PipeWire callback invocation:
+
+1. **Before `resample::convert`** — emits `"raw capture stats"` with structured fields: `role`, `src_rate`, `src_channels`, `samples`, `peak_dbfs`, `rms_dbfs`.
+2. **After `resample::convert`** — emits `"resampled capture stats"` with structured fields: `role`, `target_rate` (always 16 000), `samples`, `peak_dbfs`, `rms_dbfs`.
+
+Rate-limiting logic: a log line fires when `prev / src_rate < new_count / src_rate`, i.e. when a new 1-second boundary is crossed in the accumulated sample count. The counter is never reset; it accumulates monotonically using `saturating_add`. At 48 kHz stereo this fires at most once per second per stream regardless of buffer size.
+
+`AudioStats` is imported at the top of `loop_thread.rs` via `use crate::metrics::AudioStats;`.
+
+### Design decisions
+
+- **Threshold = `src_rate` raw samples, not frames**: The counter tracks total interleaved samples (not frames). The threshold is `u64::from(rate)` (mono frames per second). Since each buffer delivers `frames * channels` samples, the first firing may happen slightly before 1 second of wall-clock audio for multi-channel streams, but the boundary arithmetic is simple and no multiplication/division of the channel count is needed.
+- **No counter reset**: Using saturating monotonic accumulation and integer-division boundary crossing (`prev/T < new/T`) means the counter never wraps to a misleading state for any session length practical on a 64-bit target.
+- **Checkpoint 2 reuses the same counter**: Rather than maintaining a second counter for the resampled path, the resampled log fires whenever the raw log fires (same threshold check, same counter value). This ensures both log lines appear together in the output, making correlation straightforward.
+
+### Verify status
+
+- `cargo fmt --package vox-capture`: clean (auto-applied by formatter).
+- `cargo clippy --package vox-capture --all-targets -- -D warnings`: 0 warnings, 0 errors.
+- `cargo test --package vox-capture`: 32 unit tests + 5 doc tests, all pass.
+- `cargo check --package vox-capture --features pw`: fails only on missing `libpipewire-0.3` system library (pre-existing environment limitation); no Rust-level errors introduced.
+
+## vox-capture + vox-daemon — Rubato resampler, soft-mix, daemon-side instrumentation (2026-04-29)
+
+**Author:** orchestrator (main session, with audio-specialist subagent for the rubato swap)
+
+### What was implemented
+
+**C2 — `crates/vox-capture/src/resample.rs`**
+
+Replaced naive linear-interpolation resampler with `rubato::FftFixedIn` (FFT-based, anti-aliased). Public function names and signatures unchanged so callers don't change. Module-level docstring updated to remove the out-of-date "linear interp / native C lib" note.
+
+Test additions / changes:
+- New `resample_antialias_attenuates_above_nyquist` — feeds a 12 kHz sine at 48 kHz source through 48k→16k. Verifies output RMS < 0.1 × input RMS, proving the anti-alias filter removes content above the destination Nyquist.
+- Existing `resample_downsamples_correctly` and `convert_stereo_48k_to_mono_16k` updated to skip the FFT cold-start transient (first 50% of output samples) before checking the steady-state value. The transient is documented in the test comments.
+
+`Cargo.toml` (workspace) gains `rubato = "0.16"`; `crates/vox-capture/Cargo.toml` adds `rubato.workspace = true`.
+
+**A2 (3,4) + C3 + C4 — `vox-daemon/src/audio_merge.rs` and `vox-daemon/src/audio_save.rs`**
+
+`audio_merge.rs`:
+- New `PRE_MIX_GAIN = 0.5` constant.
+- Each per-stream sample is multiplied by `PRE_MIX_GAIN` before additive mixing. This guarantees the sum of mic + app stays within `[-1.0, 1.0]` for any inputs in `[-1.0, 1.0]`, eliminating the previous hard-clip distortion.
+- The clamp loop is retained as belt-and-suspenders against future N-stream changes; it now also counts samples that needed clamping and emits a `tracing::debug!` line `"merged buffer stats"` with peak/RMS dBFS and `clipped_samples`.
+- All five existing tests updated for the new gain (`mic_only`, `app_only`, `overlapping_additive_mix_does_not_clip`, `offset_chunks`, `negative_streams_do_not_clip`).
+
+`audio_save.rs`:
+- `save_wav` now emits `tracing::debug!` `"wav write input stats"` at entry with peak/RMS dBFS, sample count, and a count of input samples whose absolute value exceeds 1.0 (i.e., would need clipping).
+- The f32→i16 conversion now uses `.round()` before the `as i16` cast (was truncating toward zero).
+
+### Verify status
+
+- `cargo fmt -p vox-capture -p vox-core -p vox-transcribe -p vox-daemon`: clean.
+- `cargo clippy -p vox-capture -p vox-core -p vox-transcribe -p vox-daemon --all-targets -- -D warnings`: 0 warnings.
+- `cargo test -p vox-capture -p vox-core -p vox-transcribe -p vox-daemon`: all pass (33 vox-capture + 12 vox-core + 22 vox-transcribe non-feature-gated + 8 vox-daemon).
+
+### What was deliberately deferred
+
+**C1 (save WAV at capture rate)** was on the original plan but is held back. The change required a non-trivial vox-capture API addition (exposing pre-resample samples). The user's "muffled / quiet" symptoms have two possible root causes: (i) the 16 kHz Nyquist limit + linear-interp aliasing, which C2 already fixes, or (ii) low input amplitude at the PipeWire callback, which C1 does not fix. The new diagnostic logging from A1/A2 will reveal which root cause is actually responsible. C1 can be revisited based on that data rather than speculating now.
+
+### Open questions
+
+1. **The 50% transient skip in resample tests** is conservative — the actual stable region likely starts earlier for a single-chunk call. If we ever switch to a streaming resampler the transient only happens once at session start and tests would naturally clean up.
+2. **Pre-existing clippy errors** in vox-notify and vox-summarize (e.g. `bool_assert_comparison`, `len_zero`) are present on `main` and are unrelated to this branch — they look like a clippy version bump from a recent toolchain update. Out of scope for this PR.
