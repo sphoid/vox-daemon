@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use uuid::Uuid;
 use vox_capture::{AudioChunk, AudioSource, StreamRole};
 use vox_core::config::AppConfig;
 use vox_core::session::{
@@ -13,19 +14,82 @@ use vox_core::session::{
 use vox_storage::{JsonFileStore, SessionStore};
 use vox_transcribe::{AudioSourceRole, Transcriber, TranscriptionRequest};
 
-/// Run a recording session.
+/// Captured audio plus the in-progress [`Session`] skeleton, ready to be
+/// handed to [`process_session`] for transcription and storage.
 ///
-/// Captures audio from `PipeWire` (or a mock source), transcribes it with Whisper
-/// (or a stub transcriber), and saves the resulting session to disk.
+/// Splitting recording into a capture phase and a processing phase lets the
+/// daemon hand the heavy work (Whisper inference, summarization) off to a
+/// background task while immediately freeing the tray to start a new
+/// recording.
+pub struct CaptureOutput {
+    /// Config snapshot taken at the start of the recording. Carried through
+    /// so the processing phase uses the same settings that were active when
+    /// the user pressed Start, even if the config file changes mid-call.
+    pub config: AppConfig,
+    /// Session skeleton with a freshly minted UUID and config snapshot.
+    pub session: Session,
+    /// Raw microphone chunks captured during the session.
+    pub mic_chunks: Vec<AudioChunk>,
+    /// Raw application-audio chunks captured during the session.
+    pub app_chunks: Vec<AudioChunk>,
+}
+
+impl CaptureOutput {
+    /// Returns `true` when no audio samples were captured from either source.
+    /// Used by callers to skip the processing phase entirely.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        let mic: usize = self.mic_chunks.iter().map(|c| c.samples.len()).sum();
+        let app: usize = self.app_chunks.iter().map(|c| c.samples.len()).sum();
+        mic == 0 && app == 0
+    }
+}
+
+/// Result of running the processing phase on a [`CaptureOutput`].
 ///
-/// The `stop_flag` allows external callers (e.g., the daemon) to signal the
-/// recording to stop. When `None`, the recording runs until Ctrl+C.
+/// Reports which notifications the daemon should fire.
+#[derive(Debug, Clone, Copy)]
+pub struct ProcessingOutcome {
+    /// UUID of the saved session — used to key the `transcript_ready` and
+    /// `summary_ready` notifications.
+    pub session_id: Uuid,
+    /// `true` when auto-summarization ran and successfully produced a summary.
+    pub summary_generated: bool,
+}
+
+/// Run capture + processing as a single sequential operation.
+///
+/// Convenience wrapper for callers (e.g., the CLI `record` subcommand) that
+/// don't need the capture / processing split. The daemon does **not** use
+/// this — it invokes [`capture_session`] and [`process_session`] separately
+/// so it can return control to the user as soon as capture stops.
 pub async fn record_session(
     config: AppConfig,
     mic_override: Option<String>,
     app_override: Option<String>,
     stop_flag: Option<Arc<AtomicBool>>,
 ) -> Result<()> {
+    let capture = capture_session(config, mic_override, app_override, stop_flag).await?;
+    if capture.is_empty() {
+        tracing::warn!("no audio captured, skipping transcription");
+        return Ok(());
+    }
+    process_session(capture).await?;
+    Ok(())
+}
+
+/// Capture phase — record audio from `PipeWire` (or a mock source) until
+/// stopped, then return the raw chunks plus a [`Session`] skeleton.
+///
+/// This is the only blocking phase the daemon awaits before clearing the
+/// "recording" tray state. The `PipeWire` stop handshake is bounded to a few
+/// seconds, so this completes promptly after `stop_flag` is set.
+pub async fn capture_session(
+    config: AppConfig,
+    mic_override: Option<String>,
+    app_override: Option<String>,
+    stop_flag: Option<Arc<AtomicBool>>,
+) -> Result<CaptureOutput> {
     let (mic_chunks, app_chunks) =
         capture_audio(&config, mic_override, app_override, stop_flag).await?;
 
@@ -37,12 +101,28 @@ pub async fn record_session(
         app_sample_count
     );
 
-    if mic_sample_count == 0 && app_sample_count == 0 {
-        tracing::warn!("no audio captured, skipping transcription");
-        return Ok(());
-    }
+    let session = build_session(&config, mic_sample_count, app_sample_count);
 
-    let mut session = build_session(&config, mic_sample_count, app_sample_count);
+    Ok(CaptureOutput {
+        config,
+        session,
+        mic_chunks,
+        app_chunks,
+    })
+}
+
+/// Processing phase — transcribe captured audio, save the session, and run
+/// auto-summarization if enabled.
+///
+/// Intended to be run as a detached background task: the daemon does **not**
+/// await this before allowing a new recording to start.
+pub async fn process_session(capture: CaptureOutput) -> Result<ProcessingOutcome> {
+    let CaptureOutput {
+        config,
+        mut session,
+        mic_chunks,
+        app_chunks,
+    } = capture;
 
     let merged = transcribe_audio(&config, &mut session, &mic_chunks, &app_chunks)?;
 
@@ -67,6 +147,7 @@ pub async fn record_session(
     tracing::info!("session saved: {}", session.id);
 
     // Auto-summarize if configured
+    let mut summary_generated = false;
     if config.summarization.auto_summarize && !session.transcript.is_empty() {
         match auto_summarize(&config, &mut session).await {
             Ok(()) => {
@@ -74,6 +155,7 @@ pub async fn record_session(
                     .save(&session)
                     .context("failed to save session after summarization")?;
                 tracing::info!("auto-summarization complete for session {}", session.id);
+                summary_generated = true;
             }
             Err(e) => {
                 tracing::warn!("auto-summarization failed (session saved without summary): {e}");
@@ -81,7 +163,10 @@ pub async fn record_session(
         }
     }
 
-    Ok(())
+    Ok(ProcessingOutcome {
+        session_id: session.id,
+        summary_generated,
+    })
 }
 
 /// Run auto-summarization on the session transcript.
