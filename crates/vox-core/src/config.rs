@@ -29,6 +29,10 @@ pub struct AppConfig {
     /// Notification settings.
     #[serde(default)]
     pub notifications: NotificationConfig,
+
+    /// Logging settings.
+    #[serde(default)]
+    pub logging: LoggingConfig,
 }
 
 impl AppConfig {
@@ -329,8 +333,44 @@ impl Default for NotificationConfig {
     }
 }
 
+/// Logging configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LoggingConfig {
+    /// Verbosity level: `"error"`, `"warn"`, `"info"`, `"debug"`, or `"trace"`.
+    ///
+    /// Overridden by the `RUST_LOG` environment variable or the `-v`/`-vv` CLI flags.
+    #[serde(default = "default_log_level")]
+    pub level: String,
+
+    /// Whether to write a rolling log file under the XDG state directory.
+    #[serde(default = "default_true")]
+    pub file_enabled: bool,
+
+    /// Number of daily log files to retain before the oldest are pruned.
+    #[serde(default = "default_log_retention")]
+    pub retention_days: u32,
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            level: default_log_level(),
+            file_enabled: true,
+            retention_days: default_log_retention(),
+        }
+    }
+}
+
 fn default_auto() -> String {
     "auto".to_owned()
+}
+
+fn default_log_level() -> String {
+    "info".to_owned()
+}
+
+fn default_log_retention() -> u32 {
+    7
 }
 
 fn default_model() -> String {
@@ -427,6 +467,30 @@ mic_source = "alsa_input.usb"
         assert_eq!(config.audio.mic_source, "alsa_input.usb");
         assert_eq!(config.audio.app_source, "auto");
         assert_eq!(config.transcription.model, "small");
+    }
+
+    #[test]
+    fn test_logging_defaults_and_roundtrip() {
+        let config = AppConfig::default();
+        assert_eq!(config.logging.level, "info");
+        assert!(config.logging.file_enabled);
+        assert_eq!(config.logging.retention_days, 7);
+
+        let toml_str = toml::to_string_pretty(&config).expect("serialize");
+        let parsed: AppConfig = toml::from_str(&toml_str).expect("parse");
+        assert_eq!(config.logging, parsed.logging);
+    }
+
+    #[test]
+    fn test_partial_logging_uses_defaults() {
+        let toml_str = r#"
+[logging]
+level = "debug"
+"#;
+        let config: AppConfig = toml::from_str(toml_str).expect("parse");
+        assert_eq!(config.logging.level, "debug");
+        assert!(config.logging.file_enabled);
+        assert_eq!(config.logging.retention_days, 7);
     }
 
     #[test]
