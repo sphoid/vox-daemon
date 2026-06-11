@@ -138,6 +138,11 @@ impl OllamaClient {
         };
 
         debug!(endpoint = %self.endpoint, "sending Ollama chat request");
+        debug!(
+            system_prompt = %system_prompt,
+            user_prompt = %user_prompt,
+            "LLM request prompt"
+        );
 
         let response = self
             .http

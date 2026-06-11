@@ -172,6 +172,11 @@ impl OpenAiClient {
         };
 
         debug!(endpoint = %self.endpoint, "sending chat completion request");
+        debug!(
+            system_prompt = %system_prompt,
+            user_prompt = %user_prompt,
+            "LLM request prompt"
+        );
 
         let mut request = self
             .http
