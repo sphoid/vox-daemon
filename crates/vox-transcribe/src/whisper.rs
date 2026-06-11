@@ -222,6 +222,12 @@ impl WhisperTranscriber {
             params.set_initial_prompt(&sanitized);
         }
 
+        // Break decode-repetition loops: by default, do not feed previously
+        // generated text forward as the prompt for the next internal window.
+        // A hallucinated phrase over a silent stretch would otherwise prime the
+        // next window and self-perpetuate (see `condition_on_previous_text`).
+        params.set_no_context(!self.config.condition_on_previous_text);
+
         // We want the original speech, not an English translation.
         params.set_translate(false);
 

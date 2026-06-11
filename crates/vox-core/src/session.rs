@@ -97,6 +97,9 @@ pub struct ConfigSnapshot {
     /// Initial prompt used to condition the decoder.
     #[serde(default)]
     pub initial_prompt: String,
+    /// Whether decode windows were conditioned on previously generated text.
+    #[serde(default)]
+    pub condition_on_previous_text: bool,
 }
 
 fn default_diarization_mode() -> String {
@@ -185,6 +188,7 @@ mod tests {
             diarization_mode: "none".to_owned(),
             decoding_strategy: "beam_search".to_owned(),
             initial_prompt: String::new(),
+            condition_on_previous_text: false,
         };
         let session = Session::new(sources, config);
         assert_eq!(session.duration_seconds, 0);
@@ -214,6 +218,7 @@ mod tests {
                 diarization_mode: "none".to_owned(),
                 decoding_strategy: "beam_search".to_owned(),
                 initial_prompt: String::new(),
+                condition_on_previous_text: false,
             },
         );
 

@@ -161,6 +161,20 @@ pub struct TranscriptionConfig {
     #[serde(default)]
     pub initial_prompt: String,
 
+    /// Condition each internal decode window on previously generated text.
+    ///
+    /// This is Whisper's default behaviour. Disabling it (the default here)
+    /// prevents runaway repetition loops where a hallucinated phrase over a
+    /// silent stretch primes the next window and self-perpetuates.
+    #[serde(default)]
+    pub condition_on_previous_text: bool,
+
+    /// Runs of this many or more consecutive identical segments are collapsed
+    /// to a single segment as a decode-loop hallucination guard. `0` or `1`
+    /// disables collapsing.
+    #[serde(default = "default_repeat_collapse_threshold")]
+    pub repeat_collapse_threshold: usize,
+
     /// Initial decoding temperature. `0.0` is most confident.
     #[serde(default)]
     pub temperature: f32,
@@ -224,6 +238,8 @@ impl Default for TranscriptionConfig {
             beam_size: 5,
             best_of: 5,
             initial_prompt: String::new(),
+            condition_on_previous_text: false,
+            repeat_collapse_threshold: 3,
             temperature: 0.0,
             temperature_inc: 0.2,
             entropy_thold: 2.4,
@@ -463,6 +479,10 @@ fn default_best_of() -> i32 {
 
 fn default_temperature_inc() -> f32 {
     0.2
+}
+
+fn default_repeat_collapse_threshold() -> usize {
+    3
 }
 
 fn default_entropy_thold() -> f32 {

@@ -242,6 +242,7 @@ mod tests {
                 diarization_mode: "none".to_owned(),
                 decoding_strategy: String::new(),
                 initial_prompt: String::new(),
+                condition_on_previous_text: false,
             },
         )
     }

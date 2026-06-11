@@ -225,6 +225,12 @@ pub enum Message {
     SummaryGenerated(Result<Box<Summary>, String>),
     /// The summary was persisted to disk after generation (carries success flag).
     SummarySaved(bool),
+
+    // ── Browser: reprocess audio ─────────────────────────────────────────
+    /// The user requested re-running transcription on the session's retained audio.
+    ReprocessAudio,
+    /// Audio reprocessing finished (carries the reloaded session or an error message).
+    AudioReprocessed(Result<Box<Session>, String>),
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -292,6 +298,9 @@ pub struct VoxAppState {
     /// Whether a summary generation is currently in progress.
     pub summarizing: bool,
 
+    /// Whether an audio reprocessing (re-transcription) is currently in progress.
+    pub reprocessing: bool,
+
     /// When `Some`, the export modal is open.
     pub export_modal: Option<ExportModalState>,
 }
@@ -358,6 +367,7 @@ impl VoxAppState {
             selected_session,
             browser_status: None,
             summarizing: false,
+            reprocessing: false,
             export_modal: None,
         }
     }
@@ -841,7 +851,98 @@ pub fn update(state: &mut VoxAppState, message: Message) -> Task<Message> {
             }
             Task::none()
         }
+
+        // ── Browser: reprocess audio ─────────────────────────────────────
+        Message::ReprocessAudio => {
+            let Some(ref session) = state.selected_session else {
+                return Task::none();
+            };
+            // Only reprocessable when retained audio still exists on disk.
+            let Some(audio_path) = session.audio_file_path.as_deref().filter(|p| !p.is_empty())
+            else {
+                state.browser_status = Some("No retained audio for this session.".to_owned());
+                return Task::none();
+            };
+            if !std::path::Path::new(audio_path).exists() {
+                state.browser_status = Some("Retained audio file not found on disk.".to_owned());
+                return Task::none();
+            }
+            state.reprocessing = true;
+            state.browser_status = Some("Reprocessing audio…".to_owned());
+            let session_id = session.id;
+            let data_dir = state.settings.storage.data_dir.clone();
+            Task::perform(
+                reprocess_via_subprocess(session_id, data_dir),
+                Message::AudioReprocessed,
+            )
+        }
+        Message::AudioReprocessed(result) => {
+            state.reprocessing = false;
+            match result {
+                Ok(session) => {
+                    let session = *session;
+                    info!(
+                        "audio reprocessed: transcript now {} segments",
+                        session.transcript.len()
+                    );
+                    // Refresh the list entry preview to match the new transcript.
+                    if let Some(entry) = state.session_list.iter_mut().find(|e| e.id == session.id)
+                    {
+                        *entry = SessionListEntry::from_session(&session);
+                    }
+                    state.browser_status = Some(format!(
+                        "Reprocessed: {} segments.",
+                        session.transcript.len()
+                    ));
+                    state.selected_session = Some(session);
+                    Task::none()
+                }
+                Err(e) => {
+                    error!("audio reprocess failed: {e}");
+                    state.browser_status = Some(format!("Reprocessing failed: {e}"));
+                    Task::none()
+                }
+            }
+        }
     }
+}
+
+/// Re-run transcription on a session's retained audio by invoking this same
+/// binary's `reprocess` subcommand, then reload the updated session from disk.
+///
+/// Transcription requires the `whisper` feature and the Whisper model, which
+/// live in the daemon binary — not in `vox-gui`. Rather than pull that
+/// dependency (and the GPU toolchain) into the GUI crate, we shell out to the
+/// already-built `reprocess` subcommand of the running executable, which loads
+/// the current config and overwrites the session transcript in place.
+async fn reprocess_via_subprocess(
+    session_id: Uuid,
+    data_dir: String,
+) -> Result<Box<Session>, String> {
+    let exe = std::env::current_exe().map_err(|e| format!("cannot locate executable: {e}"))?;
+    let output = tokio::process::Command::new(exe)
+        .arg("reprocess")
+        .arg(session_id.to_string())
+        .output()
+        .await
+        .map_err(|e| format!("failed to launch reprocess: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Surface the most useful line (the error chain's first line) to the UI.
+        let detail = stderr
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("reprocess subcommand failed")
+            .trim()
+            .to_owned();
+        return Err(detail);
+    }
+
+    let store = JsonFileStore::new(&data_dir).map_err(|e| e.to_string())?;
+    let session = store.load(session_id).map_err(|e| e.to_string())?;
+    Ok(Box::new(session))
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -1310,7 +1411,7 @@ fn view_browser(state: &VoxAppState) -> Element<'_, Message> {
 
     // ── Detail panel ──────────────────────────────────────────────────────
     let detail: Element<'_, Message> = if let Some(ref session) = state.selected_session {
-        view_session_detail(session, state.summarizing)
+        view_session_detail(session, state.summarizing, state.reprocessing)
     } else {
         container(text("Select a session to view its transcript."))
             .center_x(Fill)
@@ -1336,7 +1437,11 @@ fn view_browser(state: &VoxAppState) -> Element<'_, Message> {
     .into()
 }
 
-fn view_session_detail(session: &Session, summarizing: bool) -> Element<'_, Message> {
+fn view_session_detail(
+    session: &Session,
+    summarizing: bool,
+    reprocessing: bool,
+) -> Element<'_, Message> {
     // ── Action buttons ────────────────────────────────────────────────────
     let mut actions = row![
         button("Export").on_press(Message::OpenExportModal),
@@ -1359,6 +1464,23 @@ fn view_session_detail(session: &Session, summarizing: bool) -> Element<'_, Mess
             button("Regenerate Summary").on_press(Message::RegenerateSummary)
         };
         actions = actions.push(summarize_btn);
+    }
+
+    // Show "Reprocess Audio" only when this session has retained audio still on
+    // disk — re-runs transcription with the current settings, overwriting the
+    // transcript (useful for testing transcription changes without re-recording).
+    let has_retained_audio = session
+        .audio_file_path
+        .as_deref()
+        .filter(|p| !p.is_empty())
+        .is_some_and(|p| std::path::Path::new(p).exists());
+    if has_retained_audio {
+        let reprocess_btn = if reprocessing {
+            button("Reprocessing…")
+        } else {
+            button("Reprocess Audio").on_press(Message::ReprocessAudio)
+        };
+        actions = actions.push(reprocess_btn);
     }
 
     // ── Summary section (if present) ─────────────────────────────────────

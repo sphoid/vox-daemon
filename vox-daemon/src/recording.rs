@@ -10,6 +10,7 @@ use vox_capture::{AudioChunk, AudioSource, StreamRole};
 use vox_core::config::AppConfig;
 use vox_core::session::{
     AudioRole, AudioSourceInfo, ConfigSnapshot, Session, SpeakerMapping, SpeakerSource,
+    TranscriptSegment,
 };
 use vox_storage::{JsonFileStore, SessionStore};
 use vox_transcribe::{AudioSourceRole, Transcriber, TranscriptionRequest};
@@ -272,6 +273,7 @@ fn build_session(config: &AppConfig, mic_samples: usize, app_samples: usize) -> 
         diarization_mode: config.transcription.diarization_mode.clone(),
         decoding_strategy: config.transcription.decoding_strategy.clone(),
         initial_prompt: config.transcription.initial_prompt.clone(),
+        condition_on_previous_text: config.transcription.condition_on_previous_text,
     };
 
     let mut session = Session::new(audio_sources, config_snapshot);
@@ -416,6 +418,43 @@ fn resolve_source(setting: &str, streams: &[vox_capture::StreamInfo], is_mic: bo
     }
 }
 
+/// Window length for chunked transcription, in samples at 16 kHz.
+///
+/// 30 s matches Whisper's native internal context window, so windows cut on a
+/// natural boundary. `30 s * 16_000 Hz = 480_000 samples`.
+const TRANSCRIBE_WINDOW_SAMPLES: usize = 30 * 16_000;
+
+/// Transcribe a long audio buffer as independent fixed ~30 s windows, offsetting
+/// each onto the global timeline via [`TranscriptionRequest::with_offset`], and
+/// concatenating the resulting segments.
+///
+/// Processing per-window (rather than handing the whole recording to Whisper in
+/// one call) has two structural benefits against decode-repetition loops:
+/// - the energy gate inside [`Transcriber::transcribe`] drops silent windows
+///   individually, so long dead-air stretches never seed a hallucination, and
+/// - any decode loop that does start is bounded to a single 30 s window instead
+///   of running away across the entire recording.
+fn transcribe_windowed<T: Transcriber>(
+    transcriber: &T,
+    audio: &[f32],
+) -> Result<Vec<TranscriptSegment>> {
+    let mut segments = Vec::new();
+    for (i, window) in audio.chunks(TRANSCRIBE_WINDOW_SAMPLES).enumerate() {
+        #[allow(clippy::cast_precision_loss)]
+        let offset_secs = (i * TRANSCRIBE_WINDOW_SAMPLES) as f64 / 16_000.0;
+        let request = TranscriptionRequest::with_offset(
+            window.to_vec(),
+            AudioSourceRole::Merged,
+            offset_secs,
+        );
+        let result = transcriber
+            .transcribe(&request)
+            .map_err(|e| anyhow::anyhow!("transcription failed: {e}"))?;
+        segments.extend(result.segments);
+    }
+    Ok(segments)
+}
+
 /// Transcribe audio chunks into the session transcript.
 ///
 /// When `diarization_mode` is `"none"` (default), both streams are merged
@@ -463,13 +502,15 @@ fn transcribe_audio(
         merged_duration
     );
 
-    let request = TranscriptionRequest::new(merged.clone(), AudioSourceRole::Merged);
-    let result = transcriber
-        .transcribe(&request)
-        .map_err(|e| anyhow::anyhow!("transcription failed: {e}"))?;
+    let mut segments = transcribe_windowed(&transcriber, &merged)?;
+    tracing::info!("transcription produced {} segments", segments.len());
 
-    tracing::info!("transcription produced {} segments", result.segments.len());
-    session.transcript = result.segments;
+    // Collapse any residual decode-repetition runs before diarization/storage.
+    segments = crate::transcript_postprocess::collapse_repeated_segments(
+        segments,
+        config.transcription.repeat_collapse_threshold,
+    );
+    session.transcript = segments;
 
     // Run speaker diarization if configured and available.
     #[cfg(feature = "diarize")]
@@ -645,12 +686,12 @@ pub fn reprocess_session(config: &AppConfig, session_id: &str) -> Result<()> {
     #[cfg(not(feature = "whisper"))]
     let transcriber = vox_transcribe::StubTranscriber::new();
 
-    let request = TranscriptionRequest::new(samples.clone(), AudioSourceRole::Merged);
-    let result = transcriber
-        .transcribe(&request)
-        .map_err(|e| anyhow::anyhow!("transcription failed: {e}"))?;
-
-    session.transcript = result.segments;
+    let mut segments = transcribe_windowed(&transcriber, &samples)?;
+    segments = crate::transcript_postprocess::collapse_repeated_segments(
+        segments,
+        config.transcription.repeat_collapse_threshold,
+    );
+    session.transcript = segments;
 
     // Re-run diarization if configured.
     #[cfg(feature = "diarize")]
@@ -673,6 +714,7 @@ pub fn reprocess_session(config: &AppConfig, session_id: &str) -> Result<()> {
         diarization_mode: config.transcription.diarization_mode.clone(),
         decoding_strategy: config.transcription.decoding_strategy.clone(),
         initial_prompt: config.transcription.initial_prompt.clone(),
+        condition_on_previous_text: config.transcription.condition_on_previous_text,
     };
 
     store
@@ -687,4 +729,46 @@ pub fn reprocess_session(config: &AppConfig, session_id: &str) -> Result<()> {
     );
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use vox_transcribe::{TranscribeError, TranscriptionResult};
+
+    /// Mock transcriber emitting exactly one segment per call, echoing the
+    /// request's time offset into the segment timing so the windowing logic can
+    /// be verified without a real model.
+    struct OffsetEchoTranscriber;
+
+    impl Transcriber for OffsetEchoTranscriber {
+        fn transcribe(
+            &self,
+            request: &TranscriptionRequest,
+        ) -> std::result::Result<TranscriptionResult, TranscribeError> {
+            let offset = request.time_offset_secs;
+            Ok(TranscriptionResult::new(vec![TranscriptSegment {
+                start_time: offset,
+                end_time: offset + 1.0,
+                speaker: "Speaker".to_owned(),
+                text: format!("window@{offset}"),
+            }]))
+        }
+    }
+
+    #[test]
+    fn windows_audio_and_offsets_each_window() {
+        // 75 s of audio at 16 kHz → 3 windows (30 + 30 + 15 s).
+        let audio = vec![0.1_f32; 75 * 16_000];
+        let segments = transcribe_windowed(&OffsetEchoTranscriber, &audio).expect("transcribe");
+        let offsets: Vec<f64> = segments.iter().map(|s| s.start_time).collect();
+        assert_eq!(offsets, vec![0.0, 30.0, 60.0]);
+        assert_eq!(segments.len(), 3);
+    }
+
+    #[test]
+    fn empty_audio_produces_no_segments() {
+        let segments = transcribe_windowed(&OffsetEchoTranscriber, &[]).expect("transcribe");
+        assert!(segments.is_empty());
+    }
 }

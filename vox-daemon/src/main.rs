@@ -16,6 +16,7 @@ mod audio_save;
 mod daemon;
 mod logging;
 mod recording;
+mod transcript_postprocess;
 
 /// Vox Daemon — Capture, transcribe, and summarize video call audio on Linux.
 #[derive(Parser)]
