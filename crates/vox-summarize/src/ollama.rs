@@ -14,15 +14,6 @@ use crate::{
     error::SummarizeError, parse::parse_response, prompt::build_prompt, traits::Summarizer,
 };
 
-/// Default timeout for LLM HTTP requests (5 minutes).
-///
-/// Ollama may need to load a model into memory on the first request, which
-/// can take well over a minute depending on model size and hardware.
-const REQUEST_TIMEOUT_SECS: u64 = 300;
-
-/// Approximate maximum tokens to request in the completion.
-const MAX_COMPLETION_TOKENS: u32 = 1024;
-
 // ── Request / response types ─────────────────────────────────────────────────
 
 /// A single message in the Ollama chat request.
@@ -57,6 +48,10 @@ struct OllamaChatRequest {
 #[derive(Debug, Deserialize)]
 struct OllamaChatResponse {
     message: OllamaResponseMessage,
+    /// Why generation stopped: `"stop"` (natural end) or `"length"` (hit the
+    /// `num_predict` token cap — a common cause of empty `content`).
+    #[serde(default)]
+    done_reason: Option<String>,
 }
 
 /// The assistant message in an Ollama chat response.
@@ -64,6 +59,10 @@ struct OllamaChatResponse {
 struct OllamaResponseMessage {
     #[serde(default)]
     content: String,
+    /// Reasoning text emitted by "thinking" models, separate from `content`.
+    /// When the token budget is spent here, `content` can come back empty.
+    #[serde(default)]
+    thinking: Option<String>,
 }
 
 /// Error body returned by Ollama when the request fails.
@@ -82,6 +81,8 @@ pub struct OllamaClient {
     endpoint: String,
     /// Model identifier sent in the request body.
     model: String,
+    /// Maximum tokens to request (sent as `num_predict`).
+    max_tokens: u32,
 }
 
 impl OllamaClient {
@@ -92,13 +93,20 @@ impl OllamaClient {
     /// * `base_url` — Base URL of the Ollama server (e.g. `"http://localhost:11434"`).
     ///   A trailing slash is handled automatically.
     /// * `model` — Model identifier (e.g. `"qwen2.5:1.5b"` or `"llama3"`).
+    /// * `timeout_secs` — Total request timeout in seconds.
+    /// * `max_tokens` — Maximum tokens to generate (sent as `num_predict`).
     ///
     /// # Errors
     ///
     /// Returns [`SummarizeError::Config`] if the `reqwest` client cannot be built.
-    pub fn new(base_url: &str, model: impl Into<String>) -> Result<Self, SummarizeError> {
+    pub fn new(
+        base_url: &str,
+        model: impl Into<String>,
+        timeout_secs: u64,
+        max_tokens: u32,
+    ) -> Result<Self, SummarizeError> {
         let http = Client::builder()
-            .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS))
+            .timeout(std::time::Duration::from_secs(timeout_secs))
             .build()
             .map_err(|e| SummarizeError::Config(format!("failed to build HTTP client: {e}")))?;
 
@@ -109,6 +117,7 @@ impl OllamaClient {
             http,
             endpoint,
             model: model.into(),
+            max_tokens,
         })
     }
 
@@ -132,7 +141,7 @@ impl OllamaClient {
             stream: false,
             format: "json".to_owned(),
             options: OllamaOptions {
-                num_predict: MAX_COMPLETION_TOKENS,
+                num_predict: self.max_tokens,
                 temperature: 0.2,
             },
         };
@@ -183,10 +192,27 @@ impl OllamaClient {
             }
         })?;
 
+        let done_reason = chat_response.done_reason.unwrap_or_default();
+        let thinking_chars = chat_response
+            .message
+            .thinking
+            .as_ref()
+            .map_or(0, String::len);
+        debug!(
+            done_reason = %done_reason,
+            thinking_chars,
+            "Ollama generation finished"
+        );
+
         let content = chat_response.message.content;
 
         if content.is_empty() {
+            // `done_reason = "length"` here means the token budget was spent
+            // (often on `thinking`) before any content was produced — raise
+            // `max_completion_tokens` in the summarization config.
             warn!(
+                done_reason = %done_reason,
+                thinking_chars,
                 raw_body = &body_text[..body_text.len().min(500)],
                 "Ollama returned empty content"
             );
@@ -226,25 +252,29 @@ mod tests {
 
     #[test]
     fn test_endpoint_normalisation_trailing_slash() {
-        let client = OllamaClient::new("http://localhost:11434/", "llama3").expect("build client");
+        let client = OllamaClient::new("http://localhost:11434/", "llama3", 300, 1024)
+            .expect("build client");
         assert_eq!(client.endpoint, "http://localhost:11434/api/chat");
     }
 
     #[test]
     fn test_endpoint_normalisation_no_slash() {
-        let client = OllamaClient::new("http://localhost:11434", "llama3").expect("build client");
+        let client =
+            OllamaClient::new("http://localhost:11434", "llama3", 300, 1024).expect("build client");
         assert_eq!(client.endpoint, "http://localhost:11434/api/chat");
     }
 
     #[test]
     fn test_client_stores_model() {
-        let client = OllamaClient::new("http://localhost:11434", "my-model").expect("build client");
+        let client = OllamaClient::new("http://localhost:11434", "my-model", 300, 1024)
+            .expect("build client");
         assert_eq!(client.model, "my-model");
     }
 
     #[tokio::test]
     async fn test_summarize_empty_transcript_returns_error() {
-        let client = OllamaClient::new("http://localhost:11434", "llama3").expect("build client");
+        let client =
+            OllamaClient::new("http://localhost:11434", "llama3", 300, 1024).expect("build client");
         let result = client.summarize(&[]).await;
         assert!(matches!(result, Err(SummarizeError::EmptyTranscript)));
     }

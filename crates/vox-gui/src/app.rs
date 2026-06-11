@@ -142,6 +142,10 @@ pub enum Message {
     ApiKeyChanged(String),
     /// The API model text field changed.
     ApiModelChanged(String),
+    /// The request timeout (seconds) text field changed.
+    RequestTimeoutChanged(String),
+    /// The max completion tokens text field changed.
+    MaxTokensChanged(String),
 
     // ── Settings: Storage ────────────────────────────────────────────────────
     /// The data directory text field changed.
@@ -458,6 +462,14 @@ pub fn update(state: &mut VoxAppState, message: Message) -> Task<Message> {
         }
         Message::ApiModelChanged(s) => {
             state.settings.summarization.api_model = s;
+            Task::none()
+        }
+        Message::RequestTimeoutChanged(s) => {
+            state.settings.summarization.request_timeout_secs = s;
+            Task::none()
+        }
+        Message::MaxTokensChanged(s) => {
+            state.settings.summarization.max_completion_tokens = s;
             Task::none()
         }
 
@@ -1100,6 +1112,18 @@ fn view_settings(state: &VoxAppState) -> Element<'_, Message> {
                 "e.g. gpt-4o",
                 &s.summarization.api_model,
                 Message::ApiModelChanged,
+            ),
+            stacked_text_input(
+                "Request timeout (seconds)",
+                "300",
+                &s.summarization.request_timeout_secs,
+                Message::RequestTimeoutChanged,
+            ),
+            stacked_text_input(
+                "Max response tokens (raise for reasoning models)",
+                "1024",
+                &s.summarization.max_completion_tokens,
+                Message::MaxTokensChanged,
             ),
         ],
     );

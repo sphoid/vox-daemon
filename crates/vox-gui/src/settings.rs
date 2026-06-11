@@ -419,6 +419,20 @@ pub struct SummarizationSettings {
 
     /// Model identifier for the OpenAI-compatible API.
     pub api_model: String,
+
+    /// Request timeout in seconds (applies to both backends).
+    ///
+    /// Held as a string for free text editing; parsed back to a `u64` in
+    /// [`SettingsModel::to_config`] (falling back to the default on invalid
+    /// input).
+    pub request_timeout_secs: String,
+
+    /// Maximum tokens to request from the model (applies to both backends).
+    ///
+    /// Held as a string for free text editing; parsed back to a `u32` in
+    /// [`SettingsModel::to_config`] (falling back to the default on invalid
+    /// input). Raise this for reasoning models that return empty content.
+    pub max_completion_tokens: String,
 }
 
 /// Storage settings, mirroring [`StorageConfig`].
@@ -563,6 +577,8 @@ impl SettingsModel {
                 api_url: config.summarization.api_url.clone(),
                 api_key: config.summarization.api_key.clone(),
                 api_model: config.summarization.api_model.clone(),
+                request_timeout_secs: config.summarization.request_timeout_secs.to_string(),
+                max_completion_tokens: config.summarization.max_completion_tokens.to_string(),
             },
             storage: StorageSettings {
                 data_dir: config.storage.data_dir.clone(),
@@ -610,6 +626,17 @@ impl SettingsModel {
                 api_url: self.summarization.api_url.clone(),
                 api_key: self.summarization.api_key.clone(),
                 api_model: self.summarization.api_model.clone(),
+                // Fall back to the config default for empty/invalid input.
+                request_timeout_secs: self
+                    .summarization
+                    .request_timeout_secs
+                    .parse::<u64>()
+                    .unwrap_or_else(|_| SummarizationConfig::default().request_timeout_secs),
+                max_completion_tokens: self
+                    .summarization
+                    .max_completion_tokens
+                    .parse::<u32>()
+                    .unwrap_or_else(|_| SummarizationConfig::default().max_completion_tokens),
             },
             storage: StorageConfig {
                 data_dir: self.storage.data_dir.clone(),

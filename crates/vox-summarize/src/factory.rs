@@ -42,7 +42,12 @@ pub fn create_summarizer(
                 config.ollama_model.clone()
             };
             tracing::info!(url, model, "creating Ollama summarizer (native API)");
-            let client = OllamaClient::new(url, model)?;
+            let client = OllamaClient::new(
+                url,
+                model,
+                config.request_timeout_secs,
+                config.max_completion_tokens,
+            )?;
             Ok(Box::new(client))
         }
 
@@ -72,6 +77,8 @@ pub fn create_summarizer(
                 api_key,
                 config.api_model.clone(),
                 "openai_compatible",
+                config.request_timeout_secs,
+                config.max_completion_tokens,
             )?;
             Ok(Box::new(client))
         }

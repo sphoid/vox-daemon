@@ -254,6 +254,20 @@ pub struct SummarizationConfig {
     /// Model name for the OpenAI-compatible API.
     #[serde(default)]
     pub api_model: String,
+
+    /// Maximum seconds to wait for an LLM response before the request times out.
+    ///
+    /// Raise this for large models or slow/cold-starting servers.
+    #[serde(default = "default_request_timeout")]
+    pub request_timeout_secs: u64,
+
+    /// Maximum number of tokens to request from the model.
+    ///
+    /// Sent as `num_predict` (Ollama) or `max_tokens` (OpenAI-compatible).
+    /// Raise this for reasoning/"thinking" models that spend tokens before
+    /// emitting the final answer — too low a value can yield empty responses.
+    #[serde(default = "default_max_completion_tokens")]
+    pub max_completion_tokens: u32,
 }
 
 impl Default for SummarizationConfig {
@@ -266,6 +280,8 @@ impl Default for SummarizationConfig {
             api_url: String::new(),
             api_key: String::new(),
             api_model: String::new(),
+            request_timeout_secs: default_request_timeout(),
+            max_completion_tokens: default_max_completion_tokens(),
         }
     }
 }
@@ -395,6 +411,14 @@ fn default_ollama_url() -> String {
 
 fn default_ollama_model() -> String {
     "qwen2.5:1.5b".to_owned()
+}
+
+fn default_request_timeout() -> u64 {
+    300
+}
+
+fn default_max_completion_tokens() -> u32 {
+    1024
 }
 
 fn default_export_format() -> String {
