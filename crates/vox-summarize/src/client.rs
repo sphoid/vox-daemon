@@ -209,6 +209,7 @@ impl OpenAiClient {
             .ok_or(SummarizeError::EmptyResponse)?;
 
         debug!(chars = content.len(), "received chat completion response");
+        debug!(raw_response = %content, "LLM response content");
         Ok(content)
     }
 }

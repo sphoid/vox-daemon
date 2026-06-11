@@ -189,6 +189,7 @@ impl OllamaClient {
         }
 
         debug!(chars = content.len(), "received Ollama chat response");
+        debug!(raw_response = %content, "Ollama LLM response content");
         Ok(content)
     }
 }

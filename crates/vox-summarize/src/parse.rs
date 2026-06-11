@@ -46,13 +46,23 @@ struct LlmActionItem {
 ///
 /// # Errors
 ///
-/// Currently this function does not return an error — it always produces a
-/// valid (if incomplete) [`Summary`].  The `Result` wrapper is kept so the
-/// calling code can evolve the contract if needed.
+/// Returns [`SummarizeError::EmptySummary`] when the response yields no usable
+/// content — i.e. an empty `overview` and no key points, action items, or
+/// decisions. This guards against models that return `{}` or `{"overview": ""}`,
+/// which would otherwise be silently saved as a blank summary.
 pub fn parse_response(text: &str, backend: &str, model: &str) -> Result<Summary, SummarizeError> {
     let llm_json = try_parse_json(text)
         .or_else(|| try_extract_json(text))
         .unwrap_or_else(|| fallback_parse(text));
+
+    if llm_json.overview.trim().is_empty()
+        && llm_json.key_points.is_empty()
+        && llm_json.action_items.is_empty()
+        && llm_json.decisions.is_empty()
+    {
+        tracing::warn!(backend, model, "LLM returned an empty/degenerate summary");
+        return Err(SummarizeError::EmptySummary);
+    }
 
     Ok(Summary {
         generated_at: Utc::now(),
@@ -338,6 +348,28 @@ The call covered project timelines and risks.
         let garbage = "No structure here at all. Just some random text.";
         let summary = parse_response(garbage, "ollama", "llama3").expect("should not error");
         assert!(!summary.overview.is_empty());
+    }
+
+    #[test]
+    fn test_parse_empty_json_object_errors() {
+        let result = parse_response("{}", "ollama", "llama3");
+        assert!(matches!(result, Err(SummarizeError::EmptySummary)));
+    }
+
+    #[test]
+    fn test_parse_blank_overview_errors() {
+        let result = parse_response(
+            r#"{"overview":"","key_points":[],"action_items":[],"decisions":[]}"#,
+            "ollama",
+            "llama3",
+        );
+        assert!(matches!(result, Err(SummarizeError::EmptySummary)));
+    }
+
+    #[test]
+    fn test_parse_whitespace_only_input_errors() {
+        let result = parse_response("   \n  \t ", "ollama", "llama3");
+        assert!(matches!(result, Err(SummarizeError::EmptySummary)));
     }
 
     #[test]
