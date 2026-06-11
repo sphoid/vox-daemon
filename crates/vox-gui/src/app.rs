@@ -142,6 +142,10 @@ pub enum Message {
     ApiKeyChanged(String),
     /// The API model text field changed.
     ApiModelChanged(String),
+    /// The request timeout (seconds) text field changed.
+    RequestTimeoutChanged(String),
+    /// The max completion tokens text field changed.
+    MaxTokensChanged(String),
 
     // ── Settings: Storage ────────────────────────────────────────────────────
     /// The data directory text field changed.
@@ -215,6 +219,8 @@ pub enum Message {
     // ── Browser: summarization ───────────────────────────────────────────
     /// The user requested manual AI summary generation for the selected session.
     GenerateSummary,
+    /// The user requested regeneration of an existing summary (forces overwrite).
+    RegenerateSummary,
     /// Summary generation completed (carries the summary or an error message).
     SummaryGenerated(Result<Box<Summary>, String>),
     /// The summary was persisted to disk after generation (carries success flag).
@@ -456,6 +462,14 @@ pub fn update(state: &mut VoxAppState, message: Message) -> Task<Message> {
         }
         Message::ApiModelChanged(s) => {
             state.settings.summarization.api_model = s;
+            Task::none()
+        }
+        Message::RequestTimeoutChanged(s) => {
+            state.settings.summarization.request_timeout_secs = s;
+            Task::none()
+        }
+        Message::MaxTokensChanged(s) => {
+            state.settings.summarization.max_completion_tokens = s;
             Task::none()
         }
 
@@ -734,6 +748,35 @@ pub fn update(state: &mut VoxAppState, message: Message) -> Task<Message> {
             }
             state.summarizing = true;
             state.browser_status = Some("Generating summary…".to_owned());
+            let transcript = session.transcript.clone();
+            let config = AppConfig::load().unwrap_or_else(|e| {
+                warn!("failed to load config for summarization: {e}");
+                AppConfig::default()
+            });
+            Task::perform(
+                async move {
+                    let summarizer = vox_summarize::create_summarizer(&config.summarization)
+                        .map_err(|e| e.to_string())?;
+                    let summary = summarizer
+                        .summarize(&transcript)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    Ok(Box::new(summary))
+                },
+                Message::SummaryGenerated,
+            )
+        }
+        Message::RegenerateSummary => {
+            let Some(ref session) = state.selected_session else {
+                return Task::none();
+            };
+            // Unlike GenerateSummary, this path intentionally overwrites an
+            // existing summary; only an empty transcript blocks it.
+            if session.transcript.is_empty() {
+                return Task::none();
+            }
+            state.summarizing = true;
+            state.browser_status = Some("Regenerating summary…".to_owned());
             let transcript = session.transcript.clone();
             let config = AppConfig::load().unwrap_or_else(|e| {
                 warn!("failed to load config for summarization: {e}");
@@ -1070,6 +1113,18 @@ fn view_settings(state: &VoxAppState) -> Element<'_, Message> {
                 &s.summarization.api_model,
                 Message::ApiModelChanged,
             ),
+            stacked_text_input(
+                "Request timeout (seconds)",
+                "300",
+                &s.summarization.request_timeout_secs,
+                Message::RequestTimeoutChanged,
+            ),
+            stacked_text_input(
+                "Max response tokens (raise for reasoning models)",
+                "1024",
+                &s.summarization.max_completion_tokens,
+                Message::MaxTokensChanged,
+            ),
         ],
     );
 
@@ -1289,12 +1344,19 @@ fn view_session_detail(session: &Session, summarizing: bool) -> Element<'_, Mess
     ]
     .spacing(vox_theme::SPACING);
 
-    // Show "Generate Summary" button only when no summary exists yet.
-    if session.summary.is_none() && !session.transcript.is_empty() {
-        let summarize_btn = if summarizing {
-            button("Generating…")
+    // Show "Generate Summary" when no summary exists, or "Regenerate Summary"
+    // to re-run the model over an existing summary (useful for troubleshooting).
+    if !session.transcript.is_empty() {
+        let summarize_btn = if session.summary.is_none() {
+            if summarizing {
+                button("Generating…")
+            } else {
+                button("Generate Summary").on_press(Message::GenerateSummary)
+            }
+        } else if summarizing {
+            button("Regenerating…")
         } else {
-            button("Generate Summary").on_press(Message::GenerateSummary)
+            button("Regenerate Summary").on_press(Message::RegenerateSummary)
         };
         actions = actions.push(summarize_btn);
     }

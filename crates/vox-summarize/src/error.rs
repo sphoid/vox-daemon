@@ -43,6 +43,10 @@ pub enum SummarizeError {
     #[error("LLM API returned an empty response")]
     EmptyResponse,
 
+    /// The response parsed successfully but yielded no usable summary content.
+    #[error("LLM returned an empty summary")]
+    EmptySummary,
+
     /// JSON serialization or deserialization failed.
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),

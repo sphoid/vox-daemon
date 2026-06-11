@@ -18,15 +18,6 @@ use crate::{
     error::SummarizeError, parse::parse_response, prompt::build_prompt, traits::Summarizer,
 };
 
-/// Default timeout for LLM HTTP requests (5 minutes).
-///
-/// Remote LLM endpoints can be slow, especially under load or when the
-/// provider needs to cold-start a model.
-const REQUEST_TIMEOUT_SECS: u64 = 300;
-
-/// Approximate maximum tokens to request in the completion.
-const MAX_COMPLETION_TOKENS: u32 = 1024;
-
 // ── Request / response types ─────────────────────────────────────────────────
 
 /// A single message in the chat completions request.
@@ -70,6 +61,9 @@ struct ChatResponse {
 #[derive(Debug, Deserialize)]
 struct ChatChoice {
     message: ChatResponseMessage,
+    /// Why generation stopped: `"stop"`, `"length"` (hit `max_tokens`), etc.
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
 /// The message inside a completion choice.
@@ -105,6 +99,8 @@ pub struct OpenAiClient {
     model: String,
     /// Human-readable backend name for summary metadata.
     backend_name: String,
+    /// Maximum tokens to request (sent as `max_tokens`).
+    max_tokens: u32,
 }
 
 impl OpenAiClient {
@@ -118,6 +114,8 @@ impl OpenAiClient {
     ///   unauthenticated servers.
     /// * `model` — Model identifier (e.g. `"qwen2.5:1.5b"` or `"gpt-4o"`).
     /// * `backend_name` — Label stored in the generated [`Summary`] metadata.
+    /// * `timeout_secs` — Total request timeout in seconds.
+    /// * `max_tokens` — Maximum tokens to generate (sent as `max_tokens`).
     ///
     /// # Errors
     ///
@@ -128,9 +126,11 @@ impl OpenAiClient {
         api_key: Option<String>,
         model: impl Into<String>,
         backend_name: impl Into<String>,
+        timeout_secs: u64,
+        max_tokens: u32,
     ) -> Result<Self, SummarizeError> {
         let http = Client::builder()
-            .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS))
+            .timeout(std::time::Duration::from_secs(timeout_secs))
             .build()
             .map_err(|e| SummarizeError::Config(format!("failed to build HTTP client: {e}")))?;
 
@@ -143,6 +143,7 @@ impl OpenAiClient {
             api_key,
             model: model.into(),
             backend_name: backend_name.into(),
+            max_tokens,
         })
     }
 
@@ -163,7 +164,7 @@ impl OpenAiClient {
         let body = ChatRequest {
             model: self.model.clone(),
             messages,
-            max_tokens: MAX_COMPLETION_TOKENS,
+            max_tokens: self.max_tokens,
             // Request JSON output — supported by OpenAI and recent Ollama builds.
             response_format: Some(ResponseFormat {
                 kind: "json_object".to_owned(),
@@ -172,6 +173,11 @@ impl OpenAiClient {
         };
 
         debug!(endpoint = %self.endpoint, "sending chat completion request");
+        debug!(
+            system_prompt = %system_prompt,
+            user_prompt = %user_prompt,
+            "LLM request prompt"
+        );
 
         let mut request = self
             .http
@@ -201,14 +207,30 @@ impl OpenAiClient {
 
         let chat_response: ChatResponse = response.json().await?;
 
-        let content = chat_response
+        let choice = chat_response
             .choices
             .into_iter()
             .next()
-            .and_then(|c| c.message.content)
             .ok_or(SummarizeError::EmptyResponse)?;
 
+        let finish_reason = choice.finish_reason.unwrap_or_default();
+        debug!(finish_reason = %finish_reason, "chat completion finished");
+
+        let content = match choice.message.content {
+            Some(content) if !content.is_empty() => content,
+            _ => {
+                // `finish_reason = "length"` means the token budget ran out
+                // before content was produced — raise `max_completion_tokens`.
+                warn!(
+                    finish_reason = %finish_reason,
+                    "LLM returned no content"
+                );
+                return Err(SummarizeError::EmptyResponse);
+            }
+        };
+
         debug!(chars = content.len(), "received chat completion response");
+        debug!(raw_response = %content, "LLM response content");
         Ok(content)
     }
 }
@@ -240,8 +262,15 @@ mod tests {
 
     #[test]
     fn test_endpoint_normalisation_trailing_slash() {
-        let client = OpenAiClient::new("http://localhost:11434/", None, "llama3", "ollama")
-            .expect("build client");
+        let client = OpenAiClient::new(
+            "http://localhost:11434/",
+            None,
+            "llama3",
+            "ollama",
+            300,
+            1024,
+        )
+        .expect("build client");
         assert_eq!(
             client.endpoint,
             "http://localhost:11434/v1/chat/completions"
@@ -250,8 +279,15 @@ mod tests {
 
     #[test]
     fn test_endpoint_normalisation_no_slash() {
-        let client = OpenAiClient::new("http://localhost:11434", None, "llama3", "ollama")
-            .expect("build client");
+        let client = OpenAiClient::new(
+            "http://localhost:11434",
+            None,
+            "llama3",
+            "ollama",
+            300,
+            1024,
+        )
+        .expect("build client");
         assert_eq!(
             client.endpoint,
             "http://localhost:11434/v1/chat/completions"
@@ -260,16 +296,30 @@ mod tests {
 
     #[test]
     fn test_client_stores_model_and_backend() {
-        let client = OpenAiClient::new("http://localhost:11434", None, "my-model", "my-backend")
-            .expect("build client");
+        let client = OpenAiClient::new(
+            "http://localhost:11434",
+            None,
+            "my-model",
+            "my-backend",
+            300,
+            1024,
+        )
+        .expect("build client");
         assert_eq!(client.model, "my-model");
         assert_eq!(client.backend_name, "my-backend");
     }
 
     #[tokio::test]
     async fn test_summarize_empty_transcript_returns_error() {
-        let client = OpenAiClient::new("http://localhost:11434", None, "llama3", "ollama")
-            .expect("build client");
+        let client = OpenAiClient::new(
+            "http://localhost:11434",
+            None,
+            "llama3",
+            "ollama",
+            300,
+            1024,
+        )
+        .expect("build client");
         let result = client.summarize(&[]).await;
         assert!(matches!(result, Err(SummarizeError::EmptyTranscript)));
     }

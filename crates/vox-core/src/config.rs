@@ -44,12 +44,24 @@ impl AppConfig {
     ///
     /// Returns `ConfigError` if the file exists but cannot be read or parsed.
     pub fn load() -> Result<Self, ConfigError> {
-        let path = paths::config_dir().join("config.toml");
+        Self::load_from(&paths::config_dir().join("config.toml"))
+    }
+
+    /// Load configuration from a specific file path.
+    ///
+    /// Returns [`AppConfig::default`] when the file does not exist. Kept
+    /// separate from [`load`](Self::load) so tests can exercise loading
+    /// against an explicit path without depending on global XDG state.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ConfigError` if the file exists but cannot be read or parsed.
+    fn load_from(path: &std::path::Path) -> Result<Self, ConfigError> {
         if !path.exists() {
             tracing::info!("no config file found at {}, using defaults", path.display());
             return Ok(Self::default());
         }
-        let contents = std::fs::read_to_string(&path)?;
+        let contents = std::fs::read_to_string(path)?;
         let config: Self = toml::from_str(&contents)?;
         Ok(config)
     }
@@ -254,6 +266,20 @@ pub struct SummarizationConfig {
     /// Model name for the OpenAI-compatible API.
     #[serde(default)]
     pub api_model: String,
+
+    /// Maximum seconds to wait for an LLM response before the request times out.
+    ///
+    /// Raise this for large models or slow/cold-starting servers.
+    #[serde(default = "default_request_timeout")]
+    pub request_timeout_secs: u64,
+
+    /// Maximum number of tokens to request from the model.
+    ///
+    /// Sent as `num_predict` (Ollama) or `max_tokens` (OpenAI-compatible).
+    /// Raise this for reasoning/"thinking" models that spend tokens before
+    /// emitting the final answer — too low a value can yield empty responses.
+    #[serde(default = "default_max_completion_tokens")]
+    pub max_completion_tokens: u32,
 }
 
 impl Default for SummarizationConfig {
@@ -266,6 +292,8 @@ impl Default for SummarizationConfig {
             api_url: String::new(),
             api_key: String::new(),
             api_model: String::new(),
+            request_timeout_secs: default_request_timeout(),
+            max_completion_tokens: default_max_completion_tokens(),
         }
     }
 }
@@ -397,6 +425,14 @@ fn default_ollama_model() -> String {
     "qwen2.5:1.5b".to_owned()
 }
 
+fn default_request_timeout() -> u64 {
+    300
+}
+
+fn default_max_completion_tokens() -> u32 {
+    1024
+}
+
 fn default_export_format() -> String {
     "markdown".to_owned()
 }
@@ -495,9 +531,11 @@ level = "debug"
 
     #[test]
     fn test_load_missing_file_returns_default() {
-        // When no config file exists, load() returns defaults
-        // This test works because the test environment has no XDG config dir set up
-        let config = AppConfig::load().expect("should return default");
+        // Point at a path guaranteed not to exist so the result does not depend
+        // on the developer's real ~/.config/vox-daemon/config.toml.
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let missing = dir.path().join("nonexistent").join("config.toml");
+        let config = AppConfig::load_from(&missing).expect("should return default");
         assert_eq!(config, AppConfig::default());
     }
 
