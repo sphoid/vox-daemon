@@ -44,12 +44,24 @@ impl AppConfig {
     ///
     /// Returns `ConfigError` if the file exists but cannot be read or parsed.
     pub fn load() -> Result<Self, ConfigError> {
-        let path = paths::config_dir().join("config.toml");
+        Self::load_from(&paths::config_dir().join("config.toml"))
+    }
+
+    /// Load configuration from a specific file path.
+    ///
+    /// Returns [`AppConfig::default`] when the file does not exist. Kept
+    /// separate from [`load`](Self::load) so tests can exercise loading
+    /// against an explicit path without depending on global XDG state.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ConfigError` if the file exists but cannot be read or parsed.
+    fn load_from(path: &std::path::Path) -> Result<Self, ConfigError> {
         if !path.exists() {
             tracing::info!("no config file found at {}, using defaults", path.display());
             return Ok(Self::default());
         }
-        let contents = std::fs::read_to_string(&path)?;
+        let contents = std::fs::read_to_string(path)?;
         let config: Self = toml::from_str(&contents)?;
         Ok(config)
     }
@@ -519,9 +531,11 @@ level = "debug"
 
     #[test]
     fn test_load_missing_file_returns_default() {
-        // When no config file exists, load() returns defaults
-        // This test works because the test environment has no XDG config dir set up
-        let config = AppConfig::load().expect("should return default");
+        // Point at a path guaranteed not to exist so the result does not depend
+        // on the developer's real ~/.config/vox-daemon/config.toml.
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let missing = dir.path().join("nonexistent").join("config.toml");
+        let config = AppConfig::load_from(&missing).expect("should return default");
         assert_eq!(config, AppConfig::default());
     }
 
