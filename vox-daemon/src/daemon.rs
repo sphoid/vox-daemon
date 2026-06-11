@@ -429,6 +429,7 @@ mod tests {
             diarization_mode: cfg.transcription.diarization_mode.clone(),
             decoding_strategy: cfg.transcription.decoding_strategy.clone(),
             initial_prompt: cfg.transcription.initial_prompt.clone(),
+            condition_on_previous_text: cfg.transcription.condition_on_previous_text,
         };
         Session::new(sources, snap)
     }
