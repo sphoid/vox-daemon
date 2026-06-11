@@ -17,6 +17,7 @@ thiserror = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 rfd = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
 
 [dependencies.iced]
 version = "0.14"
@@ -25,7 +26,7 @@ features = ["tokio"]
 
 [features]
 default = []
-ui = ["dep:iced", "dep:rfd"]
+ui = ["dep:iced", "dep:rfd", "dep:tokio"]
 pw = ["vox-capture/pw"]
 
 [dev-dependencies]
