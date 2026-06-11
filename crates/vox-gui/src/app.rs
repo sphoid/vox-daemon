@@ -34,7 +34,8 @@ use vox_storage::store::{JsonFileStore, SessionStore};
 use crate::browser::{SessionListEntry, build_session_list};
 use crate::search::search_transcripts;
 use crate::settings::{
-    ExportContent, ExportFormat, GpuBackend, SettingsModel, SummarizationBackend, WhisperModel,
+    ExportContent, ExportFormat, GpuBackend, LogLevel, SettingsModel, SummarizationBackend,
+    WhisperModel,
 };
 use crate::theme as vox_theme;
 
@@ -161,6 +162,14 @@ pub enum Message {
     OnTranscriptReadyToggled(bool),
     /// "On summary ready" toggle changed.
     OnSummaryReadyToggled(bool),
+
+    // ── Settings: Logging ────────────────────────────────────────────────────
+    /// The log level pick-list changed.
+    LogLevelChanged(LogLevel),
+    /// The "write log file" toggle changed.
+    FileLoggingToggled(bool),
+    /// The log retention (days) text field changed.
+    LogRetentionChanged(String),
 
     // ── Settings: persistence ────────────────────────────────────────────────
     /// Persist the current settings to disk.
@@ -483,6 +492,23 @@ pub fn update(state: &mut VoxAppState, message: Message) -> Task<Message> {
         }
         Message::OnSummaryReadyToggled(v) => {
             state.settings.notifications.on_summary_ready = v;
+            Task::none()
+        }
+
+        // ── Logging settings ──────────────────────────────────────────────
+        Message::LogLevelChanged(level) => {
+            state.settings.logging.level = level;
+            Task::none()
+        }
+        Message::FileLoggingToggled(v) => {
+            state.settings.logging.file_enabled = v;
+            Task::none()
+        }
+        Message::LogRetentionChanged(s) => {
+            // Accept digits only; ignore other input so the field stays numeric.
+            if s.chars().all(|c| c.is_ascii_digit()) {
+                state.settings.logging.retention_days = s;
+            }
             Task::none()
         }
 
@@ -1074,6 +1100,38 @@ fn view_settings(state: &VoxAppState) -> Element<'_, Message> {
         ],
     );
 
+    // ── Logging section ───────────────────────────────────────────────────
+    let logging_section = section_column(
+        "Logging",
+        column![
+            pick_row(
+                "Log level",
+                pick_list(
+                    LogLevel::all(),
+                    Some(s.logging.level),
+                    Message::LogLevelChanged,
+                )
+                .width(Fill),
+            ),
+            toggle_row(
+                "Write log file",
+                s.logging.file_enabled,
+                Message::FileLoggingToggled,
+            ),
+            stacked_text_input(
+                "Keep this many daily log files",
+                "7",
+                &s.logging.retention_days,
+                Message::LogRetentionChanged,
+            ),
+            text(format!(
+                "Logs are written to {}. Changes take effect on the next daemon start.",
+                vox_core::paths::logs_dir().display()
+            ))
+            .size(12u32),
+        ],
+    );
+
     // ── Notifications section ─────────────────────────────────────────────
     let notifications_section = section_column(
         "Notifications",
@@ -1139,6 +1197,7 @@ fn view_settings(state: &VoxAppState) -> Element<'_, Message> {
                 transcription_section,
                 summarization_section,
                 storage_section,
+                logging_section,
                 notifications_section,
                 about_section,
                 save_row,

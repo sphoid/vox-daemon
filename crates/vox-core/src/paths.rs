@@ -4,6 +4,7 @@
 //! - Config: `$XDG_CONFIG_HOME/vox-daemon/`
 //! - Data: `$XDG_DATA_HOME/vox-daemon/`
 //! - Cache: `$XDG_CACHE_HOME/vox-daemon/`
+//! - State: `$XDG_STATE_HOME/vox-daemon/` (rotating log files live here)
 
 use std::path::PathBuf;
 
@@ -52,6 +53,23 @@ pub fn cache_dir() -> PathBuf {
         .join(APP_DIR_NAME)
 }
 
+/// Returns the state directory (`$XDG_STATE_HOME/vox-daemon/`).
+///
+/// Falls back to `~/.local/state/vox-daemon/` if `XDG_STATE_HOME` is not set.
+/// The state directory holds runtime artifacts such as rotating log files.
+#[must_use]
+pub fn state_dir() -> PathBuf {
+    dirs::state_dir()
+        .unwrap_or_else(|| PathBuf::from("~/.local/state"))
+        .join(APP_DIR_NAME)
+}
+
+/// Returns the directory where rotating log files are written.
+#[must_use]
+pub fn logs_dir() -> PathBuf {
+    state_dir().join("logs")
+}
+
 /// Returns the directory where Whisper models are stored.
 #[must_use]
 pub fn models_dir() -> PathBuf {
@@ -84,6 +102,7 @@ pub fn ensure_dirs(custom_data_dir: &str) -> std::io::Result<()> {
         sessions_dir_or(custom_data_dir),
         cache_dir(),
         models_dir(),
+        logs_dir(),
     ];
 
     for dir in &dirs_to_create {
@@ -119,6 +138,13 @@ mod tests {
     }
 
     #[test]
+    fn test_state_and_logs_dirs() {
+        assert!(state_dir().ends_with(APP_DIR_NAME));
+        assert!(logs_dir().ends_with("logs"));
+        assert!(logs_dir().starts_with(state_dir()));
+    }
+
+    #[test]
     fn test_sessions_dir_is_under_data() {
         let sessions = sessions_dir();
         let data = data_dir();
@@ -133,18 +159,27 @@ mod tests {
         unsafe {
             std::env::set_var("XDG_CONFIG_HOME", dir.path().join("config"));
             std::env::set_var("XDG_CACHE_HOME", dir.path().join("cache"));
+            std::env::set_var("XDG_STATE_HOME", dir.path().join("state"));
         }
 
         ensure_dirs(custom.to_str().unwrap()).expect("ensure_dirs");
 
         assert!(dir.path().join("config").join(APP_DIR_NAME).exists());
         assert!(dir.path().join("cache").join(APP_DIR_NAME).exists());
+        assert!(
+            dir.path()
+                .join("state")
+                .join(APP_DIR_NAME)
+                .join("logs")
+                .exists()
+        );
         assert!(custom.join("sessions").exists());
 
         // SAFETY: Test cleanup; no concurrent env var access.
         unsafe {
             std::env::remove_var("XDG_CONFIG_HOME");
             std::env::remove_var("XDG_CACHE_HOME");
+            std::env::remove_var("XDG_STATE_HOME");
         }
     }
 }

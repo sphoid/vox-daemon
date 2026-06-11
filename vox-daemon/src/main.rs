@@ -9,11 +9,12 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use tracing_subscriber::EnvFilter;
+use vox_core::config::AppConfig;
 
 mod audio_merge;
 mod audio_save;
 mod daemon;
+mod logging;
 mod recording;
 
 /// Vox Daemon — Capture, transcribe, and summarize video call audio on Linux.
@@ -83,24 +84,13 @@ enum Command {
     },
 }
 
-fn init_logging(verbosity: u8) {
-    let filter = match verbosity {
-        0 => "vox_daemon=info,vox_core=info,vox_capture=info,vox_transcribe=info,vox_storage=info",
-        1 => "debug",
-        _ => "trace",
-    };
-
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(filter)),
-        )
-        .with_target(true)
-        .init();
-}
-
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    init_logging(cli.verbose);
+
+    // Load config before initializing logging so the configured verbosity and
+    // file-logging settings take effect. CLI flags / `RUST_LOG` still override.
+    let config = AppConfig::load().context("failed to load configuration")?;
+    logging::init(&config, cli.verbose);
 
     // The GUI command must run WITHOUT a tokio runtime because iced creates
     // its own internally. Handle it before building the async runtime.
@@ -121,12 +111,11 @@ fn main() -> Result<()> {
         .enable_all()
         .build()
         .context("failed to create tokio runtime")?
-        .block_on(async_main(cli))
+        .block_on(async_main(cli, config))
 }
 
-async fn async_main(cli: Cli) -> Result<()> {
+async fn async_main(cli: Cli, config: AppConfig) -> Result<()> {
     // Ensure XDG directories exist
-    let config = vox_core::config::AppConfig::load().context("failed to load configuration")?;
     vox_core::paths::ensure_dirs(&config.storage.data_dir)
         .context("failed to create application directories")?;
 

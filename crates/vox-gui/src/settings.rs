@@ -7,7 +7,7 @@
 //! directly to the TOML serialization types.
 
 use vox_core::config::{
-    AppConfig, AudioConfig, NotificationConfig, StorageConfig, SummarizationConfig,
+    AppConfig, AudioConfig, LoggingConfig, NotificationConfig, StorageConfig, SummarizationConfig,
     TranscriptionConfig,
 };
 
@@ -288,6 +288,75 @@ impl std::fmt::Display for ExportContent {
     }
 }
 
+/// Logging verbosity level, mirroring the `[logging] level` config string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogLevel {
+    /// Only errors.
+    Error,
+    /// Warnings and errors.
+    Warn,
+    /// Informational messages (default).
+    Info,
+    /// Verbose debug output.
+    Debug,
+    /// Everything, including low-level traces.
+    Trace,
+}
+
+impl LogLevel {
+    /// Returns all variants.
+    #[must_use]
+    pub fn all() -> &'static [Self] {
+        &[
+            Self::Error,
+            Self::Warn,
+            Self::Info,
+            Self::Debug,
+            Self::Trace,
+        ]
+    }
+
+    /// Returns the string identifier used in the config file.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Error => "error",
+            Self::Warn => "warn",
+            Self::Info => "info",
+            Self::Debug => "debug",
+            Self::Trace => "trace",
+        }
+    }
+
+    /// Parse from the config-file string identifier.
+    ///
+    /// Returns `None` for unrecognised values.
+    #[must_use]
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "error" => Some(Self::Error),
+            "warn" => Some(Self::Warn),
+            "info" => Some(Self::Info),
+            "debug" => Some(Self::Debug),
+            "trace" => Some(Self::Trace),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for LogLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Error => "Error (quietest)",
+            Self::Warn => "Warn",
+            Self::Info => "Info (default)",
+            Self::Debug => "Debug (verbose)",
+            Self::Trace => "Trace (everything)",
+        })
+    }
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Main settings model
 // ──────────────────────────────────────────────────────────────────────────────
@@ -387,6 +456,23 @@ pub struct NotificationSettings {
     pub on_summary_ready: bool,
 }
 
+/// Logging settings, mirroring [`LoggingConfig`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoggingSettings {
+    /// Verbosity level applied on the next daemon start.
+    pub level: LogLevel,
+
+    /// Whether to write a rolling log file under the XDG state directory.
+    pub file_enabled: bool,
+
+    /// Number of daily log files to retain before pruning.
+    ///
+    /// Held as a string so the text input can edit it freely; parsed back to a
+    /// `u32` in [`SettingsModel::to_config`] (falling back to the default on
+    /// invalid input).
+    pub retention_days: String,
+}
+
 /// The complete, UI-friendly settings model.
 ///
 /// This is the in-memory representation used by the settings window. It can
@@ -404,6 +490,8 @@ pub struct SettingsModel {
     pub storage: StorageSettings,
     /// Notification settings.
     pub notifications: NotificationSettings,
+    /// Logging settings.
+    pub logging: LoggingSettings,
 }
 
 impl SettingsModel {
@@ -448,6 +536,14 @@ impl SettingsModel {
                 ExportFormat::Markdown
             });
 
+        let log_level = LogLevel::from_str(&config.logging.level).unwrap_or_else(|| {
+            tracing::warn!(
+                "unknown log level '{}', defaulting to Info",
+                config.logging.level
+            );
+            LogLevel::Info
+        });
+
         Self {
             audio: AudioSettings {
                 mic_source: config.audio.mic_source.clone(),
@@ -479,6 +575,11 @@ impl SettingsModel {
                 on_record_stop: config.notifications.on_record_stop,
                 on_transcript_ready: config.notifications.on_transcript_ready,
                 on_summary_ready: config.notifications.on_summary_ready,
+            },
+            logging: LoggingSettings {
+                level: log_level,
+                file_enabled: config.logging.file_enabled,
+                retention_days: config.logging.retention_days.to_string(),
             },
         }
     }
@@ -522,6 +623,16 @@ impl SettingsModel {
                 on_transcript_ready: self.notifications.on_transcript_ready,
                 on_summary_ready: self.notifications.on_summary_ready,
             },
+            logging: LoggingConfig {
+                level: self.logging.level.as_str().to_owned(),
+                file_enabled: self.logging.file_enabled,
+                // Fall back to the config default for empty/invalid input.
+                retention_days: self
+                    .logging
+                    .retention_days
+                    .parse::<u32>()
+                    .unwrap_or_else(|_| LoggingConfig::default().retention_days),
+            },
         }
     }
 }
@@ -558,6 +669,21 @@ mod tests {
                 "from_str should round-trip for '{s}'"
             );
         }
+    }
+
+    #[test]
+    fn test_log_level_enum_covers_all_strings() {
+        for variant in LogLevel::all() {
+            let s = variant.as_str();
+            assert_eq!(
+                LogLevel::from_str(s),
+                Some(*variant),
+                "from_str should round-trip for '{s}'"
+            );
+        }
+        // Case-insensitive parsing with fallback to None for unknown values.
+        assert_eq!(LogLevel::from_str("INFO"), Some(LogLevel::Info));
+        assert_eq!(LogLevel::from_str("nonsense"), None);
     }
 
     #[test]
